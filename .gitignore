@@ -9,18 +9,6 @@ venv/
 ENV/
 env/
 
-# PyTorch / TensorFlow checkpoints
-*.pth
-*.pt
-*.ckpt
-
-# Model artifacts
-models/*.onnx
-models/*.engine
-models/*.trt
-models/*.bin
-models/*.npz
-
 # Logs and outputs
 logs/
 outputs/
@@ -40,9 +28,6 @@ runs/
 Thumbs.db
 
 # Data artifacts
-*.mp4
-*.avi
-*.mov
 data/*
 
 # Temporary files
