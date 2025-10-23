@@ -1,0 +1,57 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# PyTorch / TensorFlow checkpoints
+*.pth
+*.pt
+*.ckpt
+
+# Model artifacts
+models/*.onnx
+models/*.engine
+models/*.trt
+models/*.bin
+models/*.npz
+
+# Logs and outputs
+logs/
+outputs/
+runs/
+
+# IDE settings
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Data artifacts
+*.mp4
+*.avi
+*.mov
+data/*
+
+# Temporary files
+*.tmp
+*.log
+*.bak
+*.swp
+
+# PyInstaller / build artifacts
+build/
+dist/
+*.spec
