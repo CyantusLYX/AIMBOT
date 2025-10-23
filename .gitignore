@@ -9,6 +9,11 @@ venv/
 ENV/
 env/
 
+# PyTorch / TensorFlow checkpoints
+*.pth
+*.pt
+*.ckpt
+
 # Logs and outputs
 logs/
 outputs/
