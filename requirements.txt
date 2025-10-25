@@ -11,6 +11,7 @@ pyserial>=3.5
 scipy>=1.10.0
 filterpy>=1.4.5
 torchreid==0.2.5
+gdown>=4.5.1
 matplotlib>=3.5.0
 seaborn>=0.12.0
 protobuf<4.21.3

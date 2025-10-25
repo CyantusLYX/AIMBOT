@@ -36,13 +36,26 @@ class OpenCVViewer:
 
         output = frame.copy()
         for track in tracks:
+            age = int(track.get("time_since_update", 0))
+            is_target = track["track_id"] == target_id
+            if age > 0 and not is_target:
+                continue
             bbox = np.array(track.get("bbox", []), dtype=float).reshape(-1)
             if bbox.size != 4:
                 continue
             x1, y1, x2, y2 = bbox.astype(int).tolist()
-            color = (0, 255, 0) if track["track_id"] == target_id else (255, 0, 0)
-            cv2.rectangle(output, (x1, y1), (x2, y2), color, 2)
-            label = f"ID {track['track_id']}" if track["track_id"] != target_id else f"TARGET {track['track_id']}"
+            if is_target:
+                color = (0, 255, 0) if age == 0 else (0, 165, 255)
+            else:
+                color = (255, 0, 0)
+            thickness = 2 if age == 0 else 1
+            cv2.rectangle(output, (x1, y1), (x2, y2), color, thickness)
+            if is_target and age > 0:
+                label = f"TARGET {track['track_id']} (LOST {age})"
+            elif is_target:
+                label = f"TARGET {track['track_id']}"
+            else:
+                label = f"ID {track['track_id']}"
             cv2.putText(output, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
         if fps is not None and fps > 0:
             cv2.putText(

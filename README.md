@@ -52,13 +52,13 @@ data/          # 測試錄影、示範資料、合成素材
 
 - ✅ YOLOv7 偵測模組 (`src/detection/detector.py`)：支援 GPU / FP16 推論。
 - ✅ ByteTrack 追蹤器 (`src/tracking/byte_tracker.py`)：提供基本多目標追蹤與 ID 管理。
+- ✅ Re-ID 回復 (`src/reid/osnet.py` + ByteTrack)：失聯時以 OSNet 特徵進行二次匹配與 ID 回復。
 - ✅ PID 與雲台通訊介面 (`src/control/*`)：支援 dry-run 與實際序列埠控制。
 - ✅ OpenCV UI (`src/ui/viewer.py`)：顯示追蹤框、FPS、滑鼠點選目標，視窗可正常關閉。
 - ✅ 主流程腳本 (`scripts/run_pipeline.py`)：串連偵測 → 追蹤 → 控制 → UI，支援 CLI 參數、FPS 監控。
 
 ## 尚未完成
 
-- ⏳ Re-ID 整合：`src/reid/` 目前僅有模型骨架，尚未串入主追蹤流程。
 - ⏳ 多執行緒最佳化：仍使用單執行緒流程，未分離擷取 / 推論 / 控制。
 - ⏳ TensorRT 加速：尚未將 YOLOv7 / OSNet 匯出為 TensorRT。
 - ⏳ 控制模組實測：尚未於真實雲台硬體上做 PID 參數調校與封閉迴路測試。
@@ -86,6 +86,8 @@ pip install -r requirements.txt
 > pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 > ```
 
+啟用 Re-ID 需要 `torchreid` 及其依賴（例如 `gdown`），已包含在 `requirements.txt` 中。
+
 安裝完成後確認：
 
 ```powershell
@@ -100,7 +102,7 @@ python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda
 ### 4. 執行管線
 
 ```powershell
-python scripts/run_pipeline.py --weights models/epoch_149.pt --source data/DJI_20250422132606_0030_D.MP4 --device cuda --half
+python scripts/run_pipeline.py --weights models/epoch_149.pt --source data/DJI_20250422132606_0030_D.MP4 --device cuda --half --enable-reid
 ```
 
 常用參數：
@@ -111,12 +113,15 @@ python scripts/run_pipeline.py --weights models/epoch_149.pt --source data/DJI_2
 - `--person-only`：只保留 person 類別偵測。
 - `--max-frames`：限制處理影格數，方便煙霧測試。
 - `--serial-port`：雲台序列埠編號（預設 `COM3`）。
+- `--enable-reid`：啟用 OSNet Re-ID，對失聯目標嘗試重辨識。
+- `--reid-thresh`：Re-ID 相似度門檻（預設 0.45）。
+- `--reid-momentum`：Re-ID 特徵更新動量（預設 0.9）。
 
 執行後畫面會顯示：
 
 - 偵測框與追蹤 ID，若目標被使用者點選則高亮顯示。
 - 即時 FPS 文字顯示於左上角。
-- 終端會定期列印近期平均 FPS 與雲台 dry-run 控制命令。
+- 終端會定期列印近期平均 FPS 與雲台 dry-run 控制命令。啟用 Re-ID 時會額外在 GPU 上推論 OSNet。
 
 ### 5. 關閉程式
 
