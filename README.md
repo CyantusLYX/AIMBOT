@@ -7,24 +7,26 @@
 ## 系統概觀
 
 ```
-Camera Stream --> YOLOv7 偵測 --> ByteTrack 追蹤 --> Target Controller --> PID Servo --> 雲台
-																					|                                         ^
-																					+--> OSNet Re-ID (找回遺失 ID) -----------+
-UI Layer <--------------------------------------------------------------- 已渲染畫面
+Camera Stream --(FramePrefetcher)--> GPU Preprocess --> Async YOLOv7 --> ByteTrack --> Target Controller --> PID Servo --> 雲台
+																						|                                                   ^
+																						+--> OSNet Re-ID (找回遺失 ID) --------------------+
+UI Layer <-------------------------------------------------------------------- 已渲染畫面
 ```
 
-- 偵測：沿用已訓練的 YOLOv7 模型產出每幀邊界框。
+- 偵測：沿用已訓練的 YOLOv7 模型產出每幀邊界框，並可在 GPU 上啟用 FP16 提升吞吐。
 - 追蹤：整合 ByteTrack 以高速配對 ID，短暫遺失時可用緩存偵測結果補上。
-- 重識別：僅在目標失聯時啟用 OSNet 特徵比對；若環境過於擁擠再考慮切換 TransReID。
+- 重識別：僅在目標失聯時啟用 OSNet 特徵比對，可依需求切換模型規模或載入自訂權重。
 - 控制迴圈：以每軸 PID 將像素誤差轉為雲台角速度，並利用追蹤器的卡爾曼預測降低延遲。
 - 介面：即時渲染畫面與框線（OpenCV／Qt／Web），支援點擊設定新的 Target ID。
 
 ## 加速與精度重點
 
-- 將 YOLOv7 與 OSNet 匯出為 TensorRT 引擎（FP16／INT8），在 NVIDIA 平台可帶來 2-5 倍推論速度。
-- 拆分攝影機擷取、AI 推論、控制迴圈為獨立執行緒；即使推論僅 ~20 FPS，也能讓 PID 以高頻率保持平順。
-- 重識別不必逐幀執行；在目標遺失時以固定頻率觸發即可節省 GPU 資源。
-- 校正像素與雲台角度的換算比例，確保 PID 參數與實際動作對應一致。
+- FramePrefetcher + AsyncDetector：將擷取、GPU 縮放、推論拆成獨立模組，讓主迴圈持續運作。
+- GPU Resize：透過 `cv2.cuda` 先在 GPU 上縮放長邊 >1080p 的影格，以降低 YOLOv7 前處理延遲。
+- 動態 Re-ID：只在 ID 失聯時對前幾名高分偵測與與目標 IOU 近者做 OSNet，減少 GPU 次數。
+- PID 校正：統一以畫面座標誤差推估角速度，確保 dry-run 與實機行為一致。
+- TensorRT（規劃中）：將 YOLOv7 與 OSNet 匯出為 TensorRT 引擎以提升推論速度。
+- 影片同步：對離線影片自動根據影片 FPS 節流，避免播放速度快於原始素材。
 
 ## 開發路線圖
 
@@ -41,6 +43,7 @@ src/
 	tracking/    # ByteTrack 流程、卡爾曼狀態與 ID 管理
 	control/     # PID 迴圈、運動計畫與雲台通訊
 	reid/        # OSNet 特徵擷取與 ID 回復
+	pipeline/    # FramePrefetcher、GPU Preprocess、AsyncDetector 等工人模組
 	ui/          # 影像渲染與使用者互動介面
 models/        # YOLOv7 權重、TensorRT 引擎、OSNet 檢查點
 hardware/      # 雲台韌體、線材配置、校正紀錄
@@ -51,17 +54,17 @@ data/          # 測試錄影、示範資料、合成素材
 ## 完成進度
 
 - ✅ YOLOv7 偵測模組 (`src/detection/detector.py`)：支援 GPU / FP16 推論。
-- ✅ ByteTrack 追蹤器 (`src/tracking/byte_tracker.py`)：提供基本多目標追蹤與 ID 管理。
-- ✅ Re-ID 回復 (`src/reid/osnet.py` + ByteTrack)：失聯時以 OSNet 特徵進行二次匹配與 ID 回復。
-- ✅ PID 與雲台通訊介面 (`src/control/*`)：支援 dry-run 與實際序列埠控制。
+- ✅ ByteTrack 追蹤器 (`src/tracking/byte_tracker.py`)：提供多目標追蹤與 ID 管理。
+- ✅ Re-ID 回復 (`src/reid/osnet.py` + ByteTrack)：失聯時以 OSNet 特徵進行二次匹配。
+- ✅ PID 與雲台通訊 (`src/control/*`)：支援 dry-run 與實際序列埠控制。
 - ✅ OpenCV UI (`src/ui/viewer.py`)：顯示追蹤框、FPS、滑鼠點選目標，視窗可正常關閉。
-- ✅ 主流程腳本 (`scripts/run_pipeline.py`)：串連偵測 → 追蹤 → 控制 → UI，支援 CLI 參數、FPS 監控。
+- ✅ 管線工人 (`src/pipeline/workers.py` + `scripts/run_pipeline.py`)：分離擷取、GPU 預處理與非同步推論，內建 Re-ID 排程器。
 
 ## 尚未完成
 
-- ⏳ 多執行緒最佳化：仍使用單執行緒流程，未分離擷取 / 推論 / 控制。
 - ⏳ TensorRT 加速：尚未將 YOLOv7 / OSNet 匯出為 TensorRT。
 - ⏳ 控制模組實測：尚未於真實雲台硬體上做 PID 參數調校與封閉迴路測試。
+- ⏳ 進階 Re-ID：目前僅整合 torchreid OSNet，未引入 TransReID 或跨鏡頭資料。
 
 ## 安裝與使用說明
 
@@ -88,7 +91,7 @@ pip install -r requirements.txt
 
 啟用 Re-ID 需要 `torchreid` 及其依賴（例如 `gdown`），已包含在 `requirements.txt` 中。
 
-安裝完成後確認：
+安裝完成後可快速確認：
 
 ```powershell
 python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
@@ -102,26 +105,30 @@ python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda
 ### 4. 執行管線
 
 ```powershell
-python scripts/run_pipeline.py --weights models/epoch_149.pt --source data/DJI_20250422132606_0030_D.MP4 --device cuda --half --enable-reid
+python scripts/run_pipeline.py --weights models/epoch_149.pt --source data/demo.mp4 --device cuda --half --enable-reid --reid-model osnet_x0_75
 ```
 
 常用參數：
 
 - `--device`：指定推論裝置（如 `cuda`, `cuda:0`, `cpu`）。
 - `--half`：啟用半精度推論（僅限 CUDA）。
+- `--person-only`：僅保留 person 類別（默認關閉，以保留車輛等其他物件）。
 - `--dry-run`：僅輸出控制命令，不連線雲台。
-- `--person-only`：只保留 person 類別偵測。
-- `--max-frames`：限制處理影格數，方便煙霧測試。
 - `--serial-port`：雲台序列埠編號（預設 `COM3`）。
+- `--fps`：控制迴圈目標 FPS，並用於 PID 失聯回復計時。
+- `--max-frames`：限制處理影格數，方便煙霧測試。
 - `--enable-reid`：啟用 OSNet Re-ID，對失聯目標嘗試重辨識。
-- `--reid-thresh`：Re-ID 相似度門檻（預設 0.45）。
-- `--reid-momentum`：Re-ID 特徵更新動量（預設 0.9）。
+- `--process-scale`：設定偵測輸入縮放比例（1.0 為原尺寸，0 代表自動依輸入大小決定）。
+- `--reid-model`：指定 torchreid 模型（如 `osnet_x0_25`, `osnet_x0_5`, `osnet_x1_0`）。
+- `--reid-weights`：提供自訓練的 Re-ID 權重路徑（選用）。
+
+> 目前預設僅保留 `person` 類別偵測；若需追蹤其他物件，可修改 `scripts/run_pipeline.py` 中傳入 `filter_classes` 的邏輯。
 
 執行後畫面會顯示：
 
 - 偵測框與追蹤 ID，若目標被使用者點選則高亮顯示。
 - 即時 FPS 文字顯示於左上角。
-- 終端會定期列印近期平均 FPS 與雲台 dry-run 控制命令。啟用 Re-ID 時會額外在 GPU 上推論 OSNet。
+- 終端會定期列印近期平均 FPS 與雲台 dry-run 控制命令。啟用 Re-ID 時僅在 ID 遺失時觸發 OSNet 推論，減少 GPU 負擔。
 
 ### 5. 關閉程式
 

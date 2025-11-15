@@ -20,6 +20,8 @@ class OSNetEmbedder:
         device: Optional[str] = None,
         use_half: bool = False,
         image_size: Sequence[int] = (256, 128),
+        model_name: str = "osnet_x0_25",
+        weights_path: Optional[str] = None,
     ) -> None:
         default_device = "cuda:0" if torch.cuda.is_available() else "cpu"
         if device is None:
@@ -31,7 +33,10 @@ class OSNetEmbedder:
         if target_device.startswith("cuda") and not torch.cuda.is_available():
             raise RuntimeError("要求使用 CUDA 作為 Re-ID 裝置，但未偵測到可用 GPU。")
         self.device = target_device
-        self.model = torchreid.models.build_model("osnet_x0_25", num_classes=1, pretrained=True)
+        self.model_name = model_name
+        self.model = torchreid.models.build_model(model_name, num_classes=1, pretrained=True)
+        if weights_path:
+            torchreid.utils.load_pretrained_weights(self.model, weights_path)
         self.model.to(self.device)
         self.use_half = bool(use_half and self.device.startswith("cuda"))
         if self.use_half:
