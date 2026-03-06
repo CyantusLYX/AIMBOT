@@ -45,4 +45,4 @@ data/*
 build/
 dist/
 *.spec
- 
+ *.zip

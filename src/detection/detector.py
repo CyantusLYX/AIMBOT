@@ -42,6 +42,7 @@ class YoloV7Detector:
 
         torch.load = _patched_load
         try:
+            # 嘗試載入模型，若失敗則嘗試繞過依賴檢查
             self.model = torch.hub.load(
                 "WongKinYiu/yolov7",
                 "custom",
@@ -49,6 +50,26 @@ class YoloV7Detector:
                 source="github",
                 trust_repo=True,
             )
+        except Exception as e:
+            print(f"標準載入失敗，嘗試繞過依賴檢查: {e}")
+            # 這裡我們嘗試直接載入模型，不透過 torch.hub 的自動檢查
+            # 注意：這需要確保您的環境中已經有必要的依賴項
+            # 由於 torch.hub.load 會下載並緩存 repo，我們可以嘗試直接從緩存載入
+            hub_dir = torch.hub.get_dir()
+            yolov7_dir = pathlib.Path(hub_dir) / "WongKinYiu_yolov7_main"
+            if yolov7_dir.exists():
+                import sys
+                if str(yolov7_dir) not in sys.path:
+                    sys.path.insert(0, str(yolov7_dir))
+                try:
+                    from models.experimental import attempt_load
+                    self.model = attempt_load(str(resolved), map_location=self.device)
+                except ImportError:
+                     # 如果還是失敗，再次嘗試原始方法但忽略錯誤 (這很難做到，因為 torch.hub 沒有忽略錯誤的選項)
+                     # 這裡我們只能拋出原始錯誤
+                     raise e
+            else:
+                raise e
         finally:
             torch.load = original_load
         self.model.conf = conf_threshold

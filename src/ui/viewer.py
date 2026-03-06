@@ -30,33 +30,47 @@ class OpenCVViewer:
         tracks: List[dict],
         target_id: Optional[int],
         fps: Optional[float] = None,
+        secondary_target_ids: Optional[set[int]] = None,
     ) -> None:
         if not self.is_open():
             return
 
         output = frame.copy()
         for track in tracks:
+            tid = track["track_id"]
             age = int(track.get("time_since_update", 0))
-            is_target = track["track_id"] == target_id
-            if age > 0 and not is_target:
+            is_primary = tid == target_id
+            is_secondary = secondary_target_ids is not None and tid in secondary_target_ids
+            
+            # 如果不是目標且已經消失一段時間，就不顯示
+            if age > 0 and not (is_primary or is_secondary):
                 continue
+                
             bbox = np.array(track.get("bbox", []), dtype=float).reshape(-1)
             if bbox.size != 4:
                 continue
             x1, y1, x2, y2 = bbox.astype(int).tolist()
-            if is_target:
-                color = (0, 255, 0) if age == 0 else (0, 165, 255)
+            
+            if is_primary:
+                color = (0, 255, 0) if age == 0 else (0, 165, 255) # 綠色/橘色
+                thickness = 3
+                label = f"TARGET {tid}"
+            elif is_secondary:
+                color = (0, 255, 255) # 黃色
+                thickness = 2
+                label = f"MATCH {tid}"
             else:
-                color = (255, 0, 0)
-            thickness = 2 if age == 0 else 1
+                color = (255, 0, 0) # 藍色
+                thickness = 1
+                label = f"ID {tid}"
+                
             cv2.rectangle(output, (x1, y1), (x2, y2), color, thickness)
-            if is_target and age > 0:
-                label = f"TARGET {track['track_id']} (LOST {age})"
-            elif is_target:
-                label = f"TARGET {track['track_id']}"
-            else:
-                label = f"ID {track['track_id']}"
+            
+            if is_primary and age > 0:
+                label += f" (LOST {age})"
+                
             cv2.putText(output, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+            
         if fps is not None and fps > 0:
             cv2.putText(
                 output,

@@ -84,6 +84,24 @@ def create_capture(source: str) -> cv2.VideoCapture:
 
 def main() -> None:
     args = parse_args()
+
+    mode = "1"
+    print("請選擇模式:")
+    print("1. 點擊追蹤 (預設)")
+    print("2. 圖片特徵追蹤")
+    user_input = input("請輸入選項 (1/2): ").strip()
+    if user_input == "2":
+        mode = "2"
+        args.enable_reid = True
+        print("已強制啟用 Re-ID 以支援特徵追蹤")
+    
+    reference_image_path = None
+    if mode == "2":
+        reference_image_path = input("請輸入圖片路徑: ").strip().strip('"')
+        if not Path(reference_image_path).exists():
+            print(f"錯誤: 找不到檔案 {reference_image_path}")
+            return
+
     detector = YoloV7Detector(weights_path=args.weights, device=args.device, use_half=args.half)
     if detector.device.startswith("cuda"):
         detector.warmup()
@@ -110,6 +128,21 @@ def main() -> None:
         reid_max_center_dist=REID_DISTANCE,
     )
     target_ctrl = TargetController(max_lost_frames=int(args.fps * 2), reacquire_thresh=REID_SIMILARITY)
+    
+    if mode == "2" and embedder is not None:
+        ref_img = cv2.imread(reference_image_path)
+        if ref_img is None:
+            print("無法讀取參考圖片")
+            return
+        try:
+            ref_feature = embedder.encode(ref_img)
+            target_ctrl.set_reference_feature(ref_feature)
+            target_ctrl.set_reference_image(ref_img) # 設定參考圖片以計算顏色直方圖
+            print("已提取參考圖片特徵，等待目標出現...")
+        except Exception as e:
+            print(f"特徵提取失敗: {e}")
+            return
+
     pid_pan = PIDController(PID_GAINS)
     pid_tilt = PIDController(PID_GAINS)
     viewer = OpenCVViewer()
@@ -174,6 +207,14 @@ def main() -> None:
             embeddings = reid_helper.build_embeddings(result_frame, detections, target_ctrl.last_bbox)
 
         tracks = tracker.update(detections, result_frame.shape, embeddings=embeddings)
+        
+        if mode == "2" and target_ctrl.target_id is None:
+            if target_ctrl.search_and_lock(tracks, frame=result_frame):
+                print(f"已鎖定目標 ID: {target_ctrl.target_id} (共發現 {len(target_ctrl.target_ids)} 個相似目標)")
+        elif mode == "2" and target_ctrl.target_id is not None:
+             # 持續搜尋其他相似目標
+             target_ctrl.search_and_lock(tracks, frame=result_frame)
+
         target_ctrl.maintain(tracks)
 
         click = viewer.poll_click()
@@ -189,7 +230,7 @@ def main() -> None:
             tilt_cmd = pid_tilt.update(err_y, ctrl_dt)
             gimbal.send(pan_cmd, tilt_cmd)
 
-        viewer.render(result_frame, tracks, target_ctrl.target_id, fps=fps_value)
+        viewer.render(result_frame, tracks, target_ctrl.target_id, fps=fps_value, secondary_target_ids=target_ctrl.target_ids)
         key = viewer.wait_key(1)
         if key in (ord("q"), 27):
             return False
@@ -210,7 +251,12 @@ def main() -> None:
     detector_worker.submit(first_frame)
 
     try:
-        with GimbalController(args.serial_port, dry_run=args.dry_run) as gimbal:
+        # 如果是影片模式，強制開啟 dry-run，避免嘗試連線 COM port
+        force_dry_run = args.dry_run or (not is_camera)
+        if not args.dry_run and not is_camera:
+            print("偵測到影片輸入，自動啟用 dry-run 模式 (不連線雲台)")
+            
+        with GimbalController(args.serial_port, dry_run=force_dry_run) as gimbal:
             while running:
                 ret, frame = prefetcher.read()
                 if not ret:
