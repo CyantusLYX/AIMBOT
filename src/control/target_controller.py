@@ -226,7 +226,7 @@ class TargetController:
         else:
             self._lost_frames += 1
             
-        # 如果主要目標丟失太久，重置
+        # 如果主要目標丟失太久，清除鎖定狀態（保留基準特徵，等目標回來可重新鎖定）
         if self._lost_frames >= self.max_lost_frames:
             self.reset()
         # 另外，如果 target_ids 裡的目標在畫面中消失，是否要移除？
@@ -258,11 +258,19 @@ class TargetController:
         return None
 
     def reset(self) -> None:
+        """重置追蹤狀態，但保留基準特徵，使目標回到畫面後仍可自動重新鎖定。"""
         self.primary_target_id = None
         self.target_ids = set()
-        self.cached_feature = None
         self._lost_frames = 0
         self.last_bbox = None
+
+    def clear_reference(self) -> None:
+        """完全清除所有狀態，包含基準特徵（僅在換參考目標時呼叫）。"""
+        self.reset()
+        self.cached_feature = None
+        self.ref_histogram = None
+        self.ref_keypoints = None
+        self.ref_descriptors = None
 
     @staticmethod
     def compute_error(state: TargetState, frame_shape: Iterable[int]) -> Tuple[float, float]:

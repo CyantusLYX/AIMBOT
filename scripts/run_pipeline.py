@@ -56,12 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--person-only", action="store_true", help="僅保留 person 類別")
     parser.add_argument("--half", action="store_true", help="啟用半精度推論 (僅限 CUDA)")
     parser.add_argument("--enable-reid", action="store_true", help="啟用 OSNet Re-ID")
-    parser.add_argument(
-        "--process-scale",
-        type=float,
-        default=1.0,
-        help="偵測影像縮放比例，1.0 為原尺寸，0 表示自動依輸入大小調整",
-    )
+    parser.add_argument( "--process-scale", type=float, default=1.0, help="偵測影像縮放比例，1.0 為原尺寸，0 表示自動依輸入大小調整")
     parser.add_argument("--reid-model", type=str, default="osnet_x0_5", help="OSNet 模型名稱 (torchreid)")
     parser.add_argument("--reid-weights", type=str, default=None, help="自訂 Re-ID 權重路徑 (可選)")
     parser.add_argument("--dry-run", action="store_true", help="僅輸出控制命令，不實際連線雲台")
