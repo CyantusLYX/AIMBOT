@@ -15,6 +15,25 @@ except ImportError as exc:  # pragma: no cover
 
 
 class OSNetEmbedder:
+    """Thin wrapper around a torchreid OSNet model for Re-ID feature extraction.
+
+    On construction the model is loaded, optionally initialised from a custom
+    weight file, moved to the target device, and set to inference mode.  A
+    warmup forward pass determines the feature vector dimension.
+
+    Args:
+        device: Torch device string (e.g. ``"cuda:0"`` or ``"cpu"``).
+            Defaults to ``"cuda:0"`` when a GPU is available, else ``"cpu"``.
+        use_half: Enable FP16 inference. Only effective on CUDA devices.
+        image_size: ``(height, width)`` after resizing. Defaults to
+            ``(256, 128)`` — the standard OSNet training resolution.
+        model_name: torchreid model identifier (e.g. ``"osnet_x0_5"``).
+        weights_path: Optional path to a custom pre-trained weight file.
+
+    Raises:
+        RuntimeError: If a CUDA device is requested but no GPU is available.
+    """
+
     def __init__(
         self,
         device: Optional[str] = None,
@@ -51,6 +70,7 @@ class OSNetEmbedder:
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ]
         )
+        # Warmup: determine feature vector dimensionality.
         with torch.no_grad():
             dummy = torch.zeros(1, 3, height, width, device=self.device)
             if self.use_half:
@@ -60,6 +80,17 @@ class OSNetEmbedder:
 
     @torch.inference_mode()
     def encode(self, image: np.ndarray) -> np.ndarray:
+        """Extract a single L2-normalised feature vector from a BGR crop.
+
+        Args:
+            image: BGR uint8 crop of the target (any size; resized internally).
+
+        Returns:
+            1-D float32 array of length ``self.feature_dim``.
+
+        Raises:
+            ValueError: If *image* is empty or encoding fails.
+        """
         features = self.encode_batch([image])
         if not features:
             raise ValueError("Re-ID 輸入影像為空")
@@ -70,6 +101,18 @@ class OSNetEmbedder:
 
     @torch.inference_mode()
     def encode_batch(self, images: Sequence[np.ndarray]) -> List[Optional[np.ndarray]]:
+        """Extract L2-normalised feature vectors for a batch of BGR crops.
+
+        ``None`` entries in *images* (or zero-size arrays) are passed through
+        as ``None`` in the returned list so index alignment is preserved.
+
+        Args:
+            images: Sequence of BGR uint8 crops.
+
+        Returns:
+            List of float32 arrays (or ``None``) with the same length as
+            *images*.
+        """
         if images is None or len(images) == 0:
             return []
         tensors: List[Optional[torch.Tensor]] = []
@@ -111,6 +154,17 @@ class OSNetEmbedder:
         boxes: Iterable[Sequence[float]],
         padding: int = 4,
     ) -> List[Optional[np.ndarray]]:
+        """Crop detections from *frame* and return their feature vectors.
+
+        Args:
+            frame: Full BGR frame from which crops are taken.
+            boxes: Iterable of ``(x1, y1, x2, y2)`` bounding boxes.
+            padding: Pixels of context to add around each box. Defaults to 4.
+
+        Returns:
+            Feature list aligned with *boxes*; entries are ``None`` for
+            invalid or out-of-bounds crops.
+        """
         if frame is None or frame.size == 0:
             return []
         h, w = frame.shape[:2]
@@ -137,5 +191,14 @@ class OSNetEmbedder:
 
     @staticmethod
     def cosine_similarity(vec_a: np.ndarray, vec_b: np.ndarray) -> float:
+        """Compute cosine similarity between two feature vectors.
+
+        Args:
+            vec_a: First feature vector (need not be normalised).
+            vec_b: Second feature vector.
+
+        Returns:
+            Scalar in ``[-1, 1]``.
+        """
         denom = (np.linalg.norm(vec_a) * np.linalg.norm(vec_b)) + 1e-12
         return float(np.dot(vec_a, vec_b) / denom)

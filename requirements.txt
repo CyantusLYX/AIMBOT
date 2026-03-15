@@ -1,19 +1,38 @@
+# ─── PyTorch ────────────────────────────────────────────────────────────────
+# GPU 版必須在此檔案安裝前先用 CUDA index URL 安裝，否則 pip/uv 預設裝 CPU-only：
+#   uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+# CUDA 13.0 驅動向下相容 cu126 runtime，直接使用 cu126 wheel。
 torch>=2.0.0
 torchvision>=0.15.0
+
+# ─── Computer Vision ────────────────────────────────────────────────────────
 opencv-python>=4.8.0
-numpy>=1.21.0,<1.24.0
 pillow>=9.5.0
+
+# ─── Numerical / Scientific ─────────────────────────────────────────────────
+# YOLOv7 / YOLOR runtime 目前要求 numpy<1.24.0（內建依賴檢查會強制此條件）
+numpy>=1.21.0,<1.24.0
+scipy>=1.10.0
 pandas>=1.5.0
+filterpy>=1.4.5
+
+# ─── Re-ID ──────────────────────────────────────────────────────────────────
+# torchreid 0.2.5 在 PyPI 可安裝；若安裝失敗可改用源碼：
+#   uv pip install git+https://github.com/KaiyangZhou/deep-person-reid.git
+torchreid==0.2.5
+# torchreid 使用舊版 protobuf API，必須 <4.21.3（即 3.x 系列）
+protobuf<4.21.3
+
+# ─── Networking / Download ──────────────────────────────────────────────────
 requests>=2.26.0
+gdown>=4.5.1
+
+# ─── Misc / Runtime ─────────────────────────────────────────────────────────
 tqdm>=4.65.0
 pyyaml>=5.4.0
 pyserial>=3.5
-scipy>=1.10.0
-filterpy>=1.4.5
-torchreid==0.2.5
-gdown>=4.5.1
 matplotlib>=3.5.0
 seaborn>=0.12.0
-protobuf<4.21.3
-ipython>=8.0.0
 psutil>=5.9.0
+# setuptools provides pkg_resources needed by YOLOv7 hub entry point on Python 3.11+
+setuptools>=65.0
