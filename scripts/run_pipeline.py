@@ -82,6 +82,7 @@ def parse_args() -> argparse.Namespace:
         default=runtime.trt_output_format,
         help="TensorRT 輸出格式。raw=(N,85+) 後處理；nms=engine 已含 NMS",
     )
+    parser.add_argument("--trt-max-candidates", type=int, default=runtime.trt_max_candidates, help="raw TensorRT NMS 前最多保留候選框數")
     parser.add_argument("--person-only", action="store_true", help="僅保留 person 類別")
     parser.add_argument("--half", action="store_true", help="啟用半精度推論 (僅限 CUDA)")
     parser.add_argument("--enable-reid", action="store_true", help="啟用 OSNet Re-ID")
@@ -119,6 +120,7 @@ def build_runtime_config(args: argparse.Namespace) -> PipelineConfig:
             debug_frame_dir=args.debug_frame_dir,
             trt_input_shape=args.trt_input_shape,
             trt_output_format=args.trt_output_format,
+            trt_max_candidates=args.trt_max_candidates,
             conf_threshold=args.conf_thres,
             iou_threshold=args.iou_thres,
             person_only=args.person_only,
@@ -191,6 +193,9 @@ def create_detector_and_embedder(runtime):
                 conf_threshold=runtime.conf_threshold,
                 iou_threshold=runtime.iou_threshold,
                 output_format=runtime.trt_output_format,
+                max_candidates=runtime.trt_max_candidates,
+                allowed_classes=[0] if runtime.person_only else None,
+                profile=runtime.profile,
             )
         except ImportError as exc:
             print(exc)

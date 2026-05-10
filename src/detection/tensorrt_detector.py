@@ -1,5 +1,6 @@
 import gc
 import pathlib
+import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import cv2
@@ -34,6 +35,9 @@ class TensorRTYoloDetector:
         iou_threshold: float = 0.45,
         output_format: str = "auto",
         max_detections: int = 100,
+        max_candidates: int = 1000,
+        allowed_classes: Optional[Sequence[int]] = None,
+        profile: bool = False,
     ) -> None:
         resolved = pathlib.Path(engine_path).expanduser().resolve()
         if not resolved.exists():
@@ -67,6 +71,10 @@ class TensorRTYoloDetector:
         self.iou_threshold = float(iou_threshold)
         self.output_format = output_format
         self.max_detections = max(1, int(max_detections))
+        self.max_candidates = max(1, int(max_candidates))
+        self.allowed_classes = None if allowed_classes is None else [int(cls) for cls in allowed_classes]
+        self.profile = bool(profile)
+        self._profile_totals = {"preprocess": 0.0, "infer": 0.0, "postprocess": 0.0, "count": 0}
 
         cuda.init()
         cuda_device = cuda.Device(device_id)
@@ -182,9 +190,29 @@ class TensorRTYoloDetector:
 
         self._cuda_context.push()
         try:
+            start = time.time()
             tensor, ratio, pad = self._preprocess(frame)
+            after_preprocess = time.time()
             outputs = self._infer(tensor)
-            return self._postprocess(outputs, ratio, pad, frame.shape)
+            after_infer = time.time()
+            detections = self._postprocess(outputs, ratio, pad, frame.shape)
+            after_postprocess = time.time()
+            if self.profile:
+                self._profile_totals["preprocess"] += after_preprocess - start
+                self._profile_totals["infer"] += after_infer - after_preprocess
+                self._profile_totals["postprocess"] += after_postprocess - after_infer
+                self._profile_totals["count"] += 1
+                count = self._profile_totals["count"]
+                if count % 30 == 0:
+                    denom = float(count)
+                    print(
+                        "trt avg ms: preprocess={:.1f} infer={:.1f} postprocess={:.1f}".format(
+                            self._profile_totals["preprocess"] * 1000.0 / denom,
+                            self._profile_totals["infer"] * 1000.0 / denom,
+                            self._profile_totals["postprocess"] * 1000.0 / denom,
+                        )
+                    )
+            return detections
         finally:
             self._cuda_context.pop()
 
@@ -347,8 +375,17 @@ class TensorRTYoloDetector:
         boxes = raw[:, :4].copy()
         objectness = raw[:, 4]
         class_scores = raw[:, 5:]
-        class_ids = np.argmax(class_scores, axis=1).astype(np.float32)
-        scores = objectness * class_scores[np.arange(raw.shape[0]), class_ids.astype(np.int32)]
+        if self.allowed_classes:
+            allowed = np.array([cls for cls in self.allowed_classes if 0 <= cls < class_scores.shape[1]], dtype=np.int32)
+            if allowed.size == 0:
+                return np.empty((0, 6), dtype=np.float32)
+            selected_scores = class_scores[:, allowed]
+            selected_indices = np.argmax(selected_scores, axis=1)
+            class_ids = allowed[selected_indices].astype(np.float32)
+            scores = objectness * selected_scores[np.arange(raw.shape[0]), selected_indices]
+        else:
+            class_ids = np.argmax(class_scores, axis=1).astype(np.float32)
+            scores = objectness * class_scores[np.arange(raw.shape[0]), class_ids.astype(np.int32)]
         mask = scores >= self.conf_threshold
         if not np.any(mask):
             return np.empty((0, 6), dtype=np.float32)
@@ -356,6 +393,11 @@ class TensorRTYoloDetector:
         boxes = boxes[mask]
         scores = scores[mask]
         class_ids = class_ids[mask]
+        if scores.shape[0] > self.max_candidates:
+            top_indices = np.argpartition(scores, -self.max_candidates)[-self.max_candidates:]
+            boxes = boxes[top_indices]
+            scores = scores[top_indices]
+            class_ids = class_ids[top_indices]
         boxes = self._xywh_to_xyxy(boxes)
         if np.nanmax(boxes) <= 2.0:
             boxes[:, [0, 2]] *= float(self.input_width)

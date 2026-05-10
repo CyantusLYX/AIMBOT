@@ -21,6 +21,7 @@ class RuntimeConfig:
     debug_frame_dir: Optional[str] = None
     trt_input_shape: str = "640x640"
     trt_output_format: str = "auto"
+    trt_max_candidates: int = 1000
     conf_threshold: float = 0.25
     iou_threshold: float = 0.45
     person_only: bool = False
