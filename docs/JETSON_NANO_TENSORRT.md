@@ -16,7 +16,7 @@ python3 - <<'PY'
 import tensorrt as trt
 print("TensorRT", trt.__version__)
 PY
-trtexec --version || /usr/src/tensorrt/bin/trtexec --version
+/usr/src/tensorrt/bin/trtexec -h
 ```
 
 If `import tensorrt` fails, install the JetPack TensorRT Python package:
@@ -123,6 +123,48 @@ python3 scripts/run_pipeline.py \
 
 `--backend auto` also selects TensorRT automatically when `--weights` ends in
 `.engine`, `.plan`, or `.trt`.
+
+## SSH / X Forwarding Notes
+
+When running through `ssh -Y`, OpenCV/GTK windows can behave differently from a
+local desktop session.  For a quick inference smoke test without any window:
+
+```bash
+python3 scripts/run_pipeline.py \
+  --backend tensorrt \
+  --weights models/epoch_149_fp16.engine \
+  --source 0 \
+  --device cuda \
+  --trt-output-format raw \
+  --camera-backend v4l2 \
+  --no-display \
+  --dry-run \
+  --max-frames 100
+```
+
+For interactive click tracking over X forwarding, keep the display enabled but
+still force V4L2 for a USB camera:
+
+```bash
+python3 scripts/run_pipeline.py \
+  --backend tensorrt \
+  --weights models/epoch_149_fp16.engine \
+  --source 0 \
+  --device cuda \
+  --trt-output-format raw \
+  --camera-backend v4l2 \
+  --dry-run
+```
+
+The `Gtk-Message: Failed to load module "canberra-gtk-module"` warning is
+cosmetic.  It can be silenced with:
+
+```bash
+sudo apt install libcanberra-gtk-module libcanberra-gtk3-module
+```
+
+If X forwarding is not available, run locally on the Jetson desktop, use VNC,
+or use `--no-display`.
 
 ## Troubleshooting
 

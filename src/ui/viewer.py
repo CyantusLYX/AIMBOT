@@ -20,6 +20,7 @@ class OpenCVViewer:
         self.window_name = window_name
         self._clicks: Deque[Tuple[int, int]] = deque(maxlen=5)
         self._closed = False
+        self._has_rendered = False
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
         cv2.setMouseCallback(self.window_name, self._on_mouse)
 
@@ -121,6 +122,7 @@ class OpenCVViewer:
                 cv2.LINE_AA,
             )
         cv2.imshow(self.window_name, output)
+        self._has_rendered = True
 
     @staticmethod
     def wait_key(delay: int = 1) -> int:
@@ -142,6 +144,8 @@ class OpenCVViewer:
         """
         if self._closed:
             return False
+        if not self._has_rendered:
+            return True
         try:
             visible = cv2.getWindowProperty(self.window_name, cv2.WND_PROP_VISIBLE)
         except cv2.error:

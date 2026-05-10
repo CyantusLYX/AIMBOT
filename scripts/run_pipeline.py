@@ -49,6 +49,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source", type=str, default=runtime.source, help="攝影機索引或影片路徑")
     parser.add_argument("--device", type=str, default=runtime.device, help="指定裝置，例如 cuda:0")
     parser.add_argument(
+        "--camera-backend",
+        choices=("auto", "default", "v4l2", "gstreamer"),
+        default=runtime.camera_backend,
+        help="數字攝影機來源使用的 OpenCV backend；Jetson USB camera 可試 v4l2",
+    )
+    parser.add_argument("--no-display", action="store_true", help="不開 OpenCV 視窗，適合 SSH smoke test")
+    parser.add_argument(
         "--backend",
         choices=("torch", "tensorrt", "auto"),
         default=runtime.detector_backend,
@@ -94,6 +101,8 @@ def build_runtime_config(args: argparse.Namespace) -> PipelineConfig:
             source=args.source,
             device=args.device,
             detector_backend=args.backend,
+            camera_backend=args.camera_backend,
+            no_display=args.no_display,
             trt_input_shape=args.trt_input_shape,
             trt_output_format=args.trt_output_format,
             conf_threshold=args.conf_thres,
@@ -244,11 +253,9 @@ def resolve_process_scale(runtime, first_frame: np.ndarray) -> float:
 
 
 def create_class_filter(person_only: bool):
-    from detection.detector import filter_classes
-
     if person_only:
         print("僅追蹤 person 類別。若要偵測車輛請移除 --person-only。")
-        return lambda dets: filter_classes(dets, [0]) if dets.size else dets
+        return lambda dets: dets[dets[:, 5].astype(int) == 0] if dets.size else dets
     return None
 
 
@@ -301,10 +308,12 @@ def main() -> None:
 
     pid_pan = PIDController(pid_gains)
     pid_tilt = PIDController(pid_gains)
-    viewer = OpenCVViewer()
+    viewer = None if runtime.no_display else OpenCVViewer()
+    if runtime.no_display:
+        print("已啟用 no-display 模式：不開視窗、不接收滑鼠點擊。")
     fps_meter = FPSMeter(window=max(runtime.fps, 30))
 
-    cap = create_capture(runtime.source)
+    cap = create_capture(runtime.source, camera_backend=runtime.camera_backend)
     is_camera = runtime.source.isdigit()
     playback_fps = cap.get(cv2.CAP_PROP_FPS) if not is_camera else 0.0
     if playback_fps and playback_fps < 0:
@@ -340,7 +349,7 @@ def main() -> None:
 
     def process_result(result_frame: np.ndarray, detections: np.ndarray) -> bool:
         nonlocal frame_count, last_frame_time, last_control_time, next_frame_time
-        if not viewer.is_open():
+        if viewer is not None and not viewer.is_open():
             print("視窗已關閉，停止播放。")
             return False
 
@@ -360,7 +369,7 @@ def main() -> None:
 
         target_ctrl.maintain(tracks)
 
-        click = viewer.poll_click()
+        click = viewer.poll_click() if viewer is not None else None
         if click is not None:
             target_ctrl.select_by_point(tracks, click)
 
@@ -373,17 +382,18 @@ def main() -> None:
             tilt_cmd = pid_tilt.update(err_y, ctrl_dt)
             gimbal.send(pan_cmd, tilt_cmd)
 
-        viewer.render(
-            result_frame,
-            tracks,
-            target_ctrl.target_id,
-            fps=fps_value,
-            secondary_target_ids=target_ctrl.target_ids,
-            lifecycle_state=target_ctrl.lifecycle_state.value.upper(),
-        )
-        key = viewer.wait_key(1)
-        if key in (ord("q"), 27):
-            return False
+        if viewer is not None:
+            viewer.render(
+                result_frame,
+                tracks,
+                target_ctrl.target_id,
+                fps=fps_value,
+                secondary_target_ids=target_ctrl.target_ids,
+                lifecycle_state=target_ctrl.lifecycle_state.value.upper(),
+            )
+            key = viewer.wait_key(1)
+            if key in (ord("q"), 27):
+                return False
 
         if next_frame_time is not None:
             next_frame_time += target_period
@@ -427,7 +437,8 @@ def main() -> None:
         detector_worker.shutdown()
         prefetcher.stop()
         cap.release()
-        viewer.close()
+        if viewer is not None:
+            viewer.close()
 
 
 if __name__ == "__main__":

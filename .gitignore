@@ -46,3 +46,6 @@ build/
 dist/
 *.spec
  *.zip
+
+yolov7
+models/*
