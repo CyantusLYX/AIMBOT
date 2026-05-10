@@ -55,6 +55,7 @@ def parse_args() -> argparse.Namespace:
         help="數字攝影機來源使用的 OpenCV backend；Jetson USB camera 可試 v4l2",
     )
     parser.add_argument("--no-display", action="store_true", help="不開 OpenCV 視窗，適合 SSH smoke test")
+    parser.add_argument("--debug-frame-dir", type=str, default=runtime.debug_frame_dir, help="儲存偵錯 frame 到指定資料夾")
     parser.add_argument(
         "--backend",
         choices=("torch", "tensorrt", "auto"),
@@ -103,6 +104,7 @@ def build_runtime_config(args: argparse.Namespace) -> PipelineConfig:
             detector_backend=args.backend,
             camera_backend=args.camera_backend,
             no_display=args.no_display,
+            debug_frame_dir=args.debug_frame_dir,
             trt_input_shape=args.trt_input_shape,
             trt_output_format=args.trt_output_format,
             conf_threshold=args.conf_thres,
@@ -278,6 +280,27 @@ def preflight_runtime_checks() -> None:
         raise SystemExit(1)
 
 
+def _frame_stats(frame: np.ndarray) -> str:
+    if frame is None or frame.size == 0:
+        return "empty"
+    mean = frame.reshape(-1, frame.shape[-1]).mean(axis=0) if frame.ndim == 3 else np.array([frame.mean()])
+    return "shape={} dtype={} min={} max={} mean={}".format(
+        frame.shape,
+        frame.dtype,
+        int(frame.min()),
+        int(frame.max()),
+        np.round(mean, 1).tolist(),
+    )
+
+
+def _save_debug_frame(debug_dir: Optional[Path], name: str, frame: np.ndarray) -> None:
+    if debug_dir is None:
+        return
+    path = debug_dir / name
+    ok = cv2.imwrite(str(path), frame)
+    print("debug frame: {} ({}) {}".format(path, "ok" if ok else "failed", _frame_stats(frame)))
+
+
 def main() -> None:
     preflight_runtime_checks()
 
@@ -308,10 +331,16 @@ def main() -> None:
 
     pid_pan = PIDController(pid_gains)
     pid_tilt = PIDController(pid_gains)
-    viewer = None if runtime.no_display else OpenCVViewer()
+    display_enabled = not runtime.no_display
+    viewer = None
     if runtime.no_display:
         print("已啟用 no-display 模式：不開視窗、不接收滑鼠點擊。")
     fps_meter = FPSMeter(window=max(runtime.fps, 30))
+
+    debug_dir = Path(runtime.debug_frame_dir).expanduser() if runtime.debug_frame_dir else None
+    if debug_dir is not None:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        print("debug frame dir: {}".format(debug_dir))
 
     cap = create_capture(runtime.source, camera_backend=runtime.camera_backend)
     is_camera = runtime.source.isdigit()
@@ -326,6 +355,7 @@ def main() -> None:
     ret, first_frame = cap.read()
     if not ret:
         raise RuntimeError("來源沒有任何畫面")
+    _save_debug_frame(debug_dir, "capture_first.jpg", first_frame)
 
     proc_scale = resolve_process_scale(runtime, first_frame)
     detector_worker = AsyncDetector(
@@ -343,17 +373,23 @@ def main() -> None:
 
     running = True
     frame_count = 0
+    saved_result_debug = False
     last_frame_time: Optional[float] = None
     last_control_time: Optional[float] = None
     next_frame_time: Optional[float] = time.time() if target_period > 0 else None
 
     def process_result(result_frame: np.ndarray, detections: np.ndarray) -> bool:
-        nonlocal frame_count, last_frame_time, last_control_time, next_frame_time, viewer
+        nonlocal frame_count, last_frame_time, last_control_time, next_frame_time, viewer, display_enabled
+        nonlocal saved_result_debug
         if viewer is not None and not viewer.is_open():
             print("視窗已關閉，停止播放。")
             return False
 
         frame_count += 1
+        if not saved_result_debug:
+            _save_debug_frame(debug_dir, "display_first.jpg", result_frame)
+            print("first detections: {}".format(int(detections.shape[0]) if detections.ndim >= 2 else 0))
+            saved_result_debug = True
         now = time.time()
         frame_dt = 0.0 if last_frame_time is None else now - last_frame_time
         last_frame_time = now
@@ -382,6 +418,9 @@ def main() -> None:
             tilt_cmd = pid_tilt.update(err_y, ctrl_dt)
             gimbal.send(pan_cmd, tilt_cmd)
 
+        if display_enabled and viewer is None:
+            viewer = OpenCVViewer()
+
         if viewer is not None:
             rendered = viewer.render(
                 result_frame,
@@ -395,6 +434,7 @@ def main() -> None:
                 print("警告: OpenCV 視窗輸出失敗，已切換為 no-display 模式繼續執行。")
                 viewer.close()
                 viewer = None
+                display_enabled = False
                 return True
             key = viewer.wait_key(1)
             if key in (ord("q"), 27):

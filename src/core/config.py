@@ -12,6 +12,7 @@ class RuntimeConfig:
     detector_backend: str = "auto"
     camera_backend: str = "auto"
     no_display: bool = False
+    debug_frame_dir: Optional[str] = None
     trt_input_shape: str = "640x640"
     trt_output_format: str = "auto"
     conf_threshold: float = 0.25
