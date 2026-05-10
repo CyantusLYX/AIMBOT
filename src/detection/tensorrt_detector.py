@@ -1,3 +1,4 @@
+import gc
 import pathlib
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -68,7 +69,12 @@ class TensorRTYoloDetector:
         self.max_detections = max(1, int(max_detections))
 
         cuda.init()
-        self._cuda_context = cuda.Device(device_id).make_context()
+        cuda_device = cuda.Device(device_id)
+        if hasattr(cuda_device, "retain_primary_context"):
+            self._cuda_context = cuda_device.retain_primary_context()
+            self._cuda_context.push()
+        else:
+            self._cuda_context = cuda_device.make_context()
         self._closed = False
         try:
             self._load_engine(resolved, input_shape)
@@ -438,12 +444,52 @@ class TensorRTYoloDetector:
             self.detect(dummy)
 
     def close(self) -> None:
-        if self._closed:
+        if not hasattr(self, "_closed") or self._closed:
             return
-        self._cuda_context.push()
-        try:
-            self.stream.synchronize()
-        finally:
-            self._cuda_context.pop()
-            self._cuda_context.detach()
+        cuda_context = getattr(self, "_cuda_context", None)
+        if cuda_context is None:
             self._closed = True
+            return
+
+        pushed = False
+        try:
+            cuda_context.push()
+            pushed = True
+            stream = getattr(self, "stream", None)
+            if stream is not None:
+                stream.synchronize()
+
+            for binding in getattr(self, "binding_info", []):
+                if binding.device is not None:
+                    try:
+                        binding.device.free()
+                    except Exception:
+                        pass
+                    binding.device = None
+                binding.host = None
+
+            self.bindings = []
+            self.input_binding = None
+            self.output_bindings = []
+            self.context = None
+            self.engine = None
+            self.stream = None
+            gc.collect()
+        finally:
+            if pushed:
+                try:
+                    cuda_context.pop()
+                except Exception:
+                    pass
+            try:
+                cuda_context.detach()
+            except Exception:
+                pass
+            self._closed = True
+            self._cuda_context = None
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass

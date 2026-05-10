@@ -151,7 +151,7 @@ class OpenCVViewer:
         except cv2.error:
             self._closed = True
             return False
-        if visible <= 0:
+        if visible < 0:
             self._closed = True
             return False
         return True
