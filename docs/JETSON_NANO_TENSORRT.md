@@ -156,6 +156,24 @@ python3 scripts/run_pipeline.py \
   --dry-run
 ```
 
+If the debug frame is pure green, the camera is likely a CSI camera being read
+as raw Bayer through V4L2. Use the Argus backend instead:
+
+```bash
+python3 scripts/run_pipeline.py \
+  --backend tensorrt \
+  --weights models/epoch_149_fp16.engine \
+  --source 0 \
+  --device cuda \
+  --trt-output-format raw \
+  --camera-backend argus \
+  --camera-width 1280 \
+  --camera-height 720 \
+  --camera-fps 30 \
+  --debug-frame-dir /tmp/aimbot-debug \
+  --dry-run
+```
+
 The `Gtk-Message: Failed to load module "canberra-gtk-module"` warning is
 cosmetic.  It can be silenced with:
 

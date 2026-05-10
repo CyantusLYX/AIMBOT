@@ -11,6 +11,9 @@ class RuntimeConfig:
     device: Optional[str] = None
     detector_backend: str = "auto"
     camera_backend: str = "auto"
+    camera_width: int = 1280
+    camera_height: int = 720
+    camera_fps: int = 30
     no_display: bool = False
     debug_frame_dir: Optional[str] = None
     trt_input_shape: str = "640x640"

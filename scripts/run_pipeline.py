@@ -50,10 +50,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default=runtime.device, help="指定裝置，例如 cuda:0")
     parser.add_argument(
         "--camera-backend",
-        choices=("auto", "default", "v4l2", "gstreamer"),
+        choices=("auto", "default", "v4l2", "gstreamer", "argus"),
         default=runtime.camera_backend,
-        help="數字攝影機來源使用的 OpenCV backend；Jetson USB camera 可試 v4l2",
+        help="數字攝影機來源使用的 OpenCV backend；Jetson CSI camera 請用 argus",
     )
+    parser.add_argument("--camera-width", type=int, default=runtime.camera_width, help="攝影機輸入寬度")
+    parser.add_argument("--camera-height", type=int, default=runtime.camera_height, help="攝影機輸入高度")
+    parser.add_argument("--camera-fps", type=int, default=runtime.camera_fps, help="攝影機輸入 FPS")
     parser.add_argument("--no-display", action="store_true", help="不開 OpenCV 視窗，適合 SSH smoke test")
     parser.add_argument("--debug-frame-dir", type=str, default=runtime.debug_frame_dir, help="儲存偵錯 frame 到指定資料夾")
     parser.add_argument(
@@ -103,6 +106,9 @@ def build_runtime_config(args: argparse.Namespace) -> PipelineConfig:
             device=args.device,
             detector_backend=args.backend,
             camera_backend=args.camera_backend,
+            camera_width=args.camera_width,
+            camera_height=args.camera_height,
+            camera_fps=args.camera_fps,
             no_display=args.no_display,
             debug_frame_dir=args.debug_frame_dir,
             trt_input_shape=args.trt_input_shape,
@@ -342,7 +348,13 @@ def main() -> None:
         debug_dir.mkdir(parents=True, exist_ok=True)
         print("debug frame dir: {}".format(debug_dir))
 
-    cap = create_capture(runtime.source, camera_backend=runtime.camera_backend)
+    cap = create_capture(
+        runtime.source,
+        camera_backend=runtime.camera_backend,
+        width=runtime.camera_width,
+        height=runtime.camera_height,
+        fps=runtime.camera_fps,
+    )
     is_camera = runtime.source.isdigit()
     playback_fps = cap.get(cv2.CAP_PROP_FPS) if not is_camera else 0.0
     if playback_fps and playback_fps < 0:
