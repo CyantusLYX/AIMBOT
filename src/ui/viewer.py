@@ -24,6 +24,10 @@ class OpenCVViewer:
         self._window_sized = False
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
         cv2.setMouseCallback(self.window_name, self._on_mouse)
+        try:
+            cv2.startWindowThread()
+        except cv2.error:
+            pass
 
     def _on_mouse(self, event: int, x: int, y: int, flags: int, param: None) -> None:
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -180,19 +184,7 @@ class OpenCVViewer:
         Returns:
             ``False`` once the window has been closed by any means.
         """
-        if self._closed:
-            return False
-        if not self._has_rendered:
-            return True
-        try:
-            visible = cv2.getWindowProperty(self.window_name, cv2.WND_PROP_VISIBLE)
-        except cv2.error:
-            self._closed = True
-            return False
-        if visible < 0:
-            self._closed = True
-            return False
-        return True
+        return not self._closed
 
     def close(self) -> None:
         """Destroy the OpenCV window and mark the viewer as closed."""

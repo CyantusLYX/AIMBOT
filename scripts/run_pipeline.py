@@ -393,9 +393,6 @@ def main() -> None:
     def process_result(result_frame: np.ndarray, detections: np.ndarray) -> bool:
         nonlocal frame_count, last_frame_time, last_control_time, next_frame_time, viewer, display_enabled
         nonlocal saved_result_debug
-        if viewer is not None and not viewer.is_open():
-            print("視窗已關閉，停止播放。")
-            return False
 
         frame_count += 1
         if not saved_result_debug:
