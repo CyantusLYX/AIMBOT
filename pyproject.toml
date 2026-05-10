@@ -1,0 +1,102 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aimbot"
+version = "0.1.0"
+description = "Real-time visual tracking and gimbal control pipeline (YOLOv7 + ByteTrack + OSNet Re-ID)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "opencv-python>=4.8.0",
+    # YOLOR runtime dependency check requires numpy<1.24.0.
+    "numpy>=1.21.0,<1.24.0",
+    "pillow>=9.5.0",
+    "requests>=2.26.0",
+    "tqdm>=4.65.0",
+    "pyyaml>=5.4.0",
+    "pyserial>=3.5",
+    "scipy>=1.10.0",
+    "gdown>=4.5.1",
+    "matplotlib>=3.5.0",
+    # protobuf: torchreid requires <4.21.3 for protobuf API compatibility.
+    "protobuf<4.21.3",
+    "psutil>=5.9.0",
+]
+
+[project.optional-dependencies]
+# -------------------------------------------------------------------------
+# PyTorch / CUDA
+# -------------------------------------------------------------------------
+# uv cannot select a CUDA variant automatically.  Install the correct build
+# for your GPU BEFORE running `uv sync`:
+#
+#   CUDA 12.6 wheel (compatible with CUDA 13.0 driver — driver is backward-compat):
+#     uv pip install torch torchvision \
+#       --index-url https://download.pytorch.org/whl/cu126
+#
+#   CPU-only (testing / CI):
+#     uv pip install torch torchvision \
+#       --index-url https://download.pytorch.org/whl/cpu
+#
+# The entries below are used only when no GPU build is pre-installed.
+torch-cpu = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+]
+
+# Re-ID support (requires torch to be installed first).
+reid = [
+    "torchreid==0.2.5",
+]
+
+# Developer tooling.
+dev = [
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+]
+
+[tool.hatch.build.targets.wheel]
+# Expose src/* sub-packages as top-level importable packages so scripts can
+# rely on the sys.path injection in run_pipeline.py without a pip install -e.
+packages = [
+    "src/adapters",
+    "src/app",
+    "src/control",
+    "src/core",
+    "src/detection",
+    "src/pipeline",
+    "src/reid",
+    "src/services",
+    "src/tracking",
+    "src/ui",
+]
+
+# ---------------------------------------------------------------------------
+# Ruff (linter + formatter)
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "W"]
+# E501 (line too long) is enforced by line-length above, not as a separate
+# error, to avoid conflicts with formatter output.
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "adapters", "app", "control", "core", "detection", "pipeline", "reid", "services", "tracking", "ui",
+]
+
+# ---------------------------------------------------------------------------
+# mypy
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_return_any = true
+warn_unused_ignores = false

@@ -1,3 +1,13 @@
+"""Async pipeline workers for frame capture, preprocessing, detection, and Re-ID.
+
+This module provides the concurrency primitives that decouple IO-bound camera
+reading from GPU-bound detection inference:
+
+- ``FramePrefetcher`` — background thread that drains ``cv2.VideoCapture``.
+- ``GpuPreprocessor`` — optional CUDA-accelerated frame resize.
+- ``AsyncDetector`` — single-worker thread-pool for YOLOv7 inference.
+- ``ReIDHelper`` — schedules OSNet embedding extraction for top-K detections.
+"""
 from __future__ import annotations
 
 import concurrent.futures
@@ -17,11 +27,30 @@ if TYPE_CHECKING:  # pragma: no cover
 
 @dataclass
 class DetectionResult:
+    """Result produced by :class:`AsyncDetector` for a single frame.
+
+    Attributes:
+        frame: Original BGR frame at full resolution (uint8).
+        detections: Detection array of shape ``(N, 6)`` — columns are
+            ``x1, y1, x2, y2, confidence, class_id``.
+    """
+
     frame: np.ndarray
     detections: np.ndarray
 
 
 class FramePrefetcher:
+    """Background-thread wrapper around ``cv2.VideoCapture``.
+
+    Continuously fills an internal queue so the main thread never blocks on
+    ``cap.read()``.  A ``None`` sentinel is enqueued when the source is
+    exhausted or an error occurs.
+
+    Args:
+        capture: An already-opened ``cv2.VideoCapture`` instance.
+        queue_size: Maximum number of frames to buffer.  Must be >= 1.
+    """
+
     def __init__(self, capture: cv2.VideoCapture, queue_size: int = 4) -> None:
         self._capture = capture
         self._queue: "queue.Queue[Optional[np.ndarray]]" = queue.Queue(maxsize=max(1, queue_size))
@@ -41,12 +70,19 @@ class FramePrefetcher:
             self._queue.put(frame)
 
     def read(self) -> tuple[bool, Optional[np.ndarray]]:
+        """Block until a frame is available and return it.
+
+        Returns:
+            A ``(success, frame)`` pair.  ``success`` is ``False`` when the
+            source has been exhausted; ``frame`` is ``None`` in that case.
+        """
         frame = self._queue.get()
         if frame is None:
             return False, None
         return True, frame
 
     def stop(self) -> None:
+        """Signal the reader thread to stop and wait for it to exit."""
         self._stop.set()
         try:
             self._queue.put_nowait(None)
@@ -56,6 +92,17 @@ class FramePrefetcher:
 
 
 class GpuPreprocessor:
+    """Optional CUDA-accelerated frame resizer.
+
+    If OpenCV was built with CUDA support and at least one CUDA device is
+    available, frames are resized on the GPU.  Otherwise CPU ``cv2.resize``
+    with ``INTER_AREA`` is used transparently.
+
+    Args:
+        scale: Target scale factor in the range ``[0.3, 1.0]``.  Values
+            outside this range are clamped.
+    """
+
     def __init__(self, scale: float) -> None:
         self.scale = float(max(min(scale, 1.0), 0.3))
         self._use_cuda = self.scale < 0.999 and hasattr(cv2, "cuda") and cv2.cuda.getCudaEnabledDeviceCount() > 0
@@ -63,6 +110,16 @@ class GpuPreprocessor:
 
     @staticmethod
     def auto_scale(width: int, height: int) -> float:
+        """Suggest a scale factor based on the frame resolution.
+
+        Args:
+            width: Frame width in pixels.
+            height: Frame height in pixels.
+
+        Returns:
+            A scale factor in ``(0, 1]`` tuned to keep the detector input
+            at a reasonable size without excessive downsampling.
+        """
         if max(width, height) <= 1280:
             return 1.0
         if max(width, height) <= 1920:
@@ -72,6 +129,15 @@ class GpuPreprocessor:
         return 0.6
 
     def resize(self, frame: np.ndarray) -> np.ndarray:
+        """Resize *frame* by the configured scale factor.
+
+        Args:
+            frame: Input BGR frame (uint8).
+
+        Returns:
+            Resized frame.  Returns the same array unchanged when
+            ``scale >= 1.0``.
+        """
         if self.scale >= 0.999:
             return frame
         h, w = frame.shape[:2]
@@ -88,6 +154,20 @@ class GpuPreprocessor:
 
 
 class AsyncDetector:
+    """One-frame-deep asynchronous wrapper around :class:`YoloV7Detector`.
+
+    Inference runs in a single-worker ``ThreadPoolExecutor``.  ``submit()``
+    enqueues the *current* frame and returns the *previous* frame's result,
+    keeping latency at exactly one frame.  ``flush()`` drains the last
+    pending result after the video source is exhausted.
+
+    Args:
+        detector: Initialised detector instance.
+        preprocessor: Frame resizer applied before inference.
+        class_filter: Optional callable that filters the raw detection array.
+            Receives an ``(N, 6)`` array and must return a filtered array.
+    """
+
     def __init__(
         self,
         detector: "YoloV7Detector",
@@ -117,6 +197,15 @@ class AsyncDetector:
         return DetectionResult(frame=frame, detections=detections)
 
     def submit(self, frame: np.ndarray) -> Optional[DetectionResult]:
+        """Submit *frame* for inference and return the previous result.
+
+        Args:
+            frame: BGR frame to detect on.
+
+        Returns:
+            The :class:`DetectionResult` for the *previous* frame, or
+            ``None`` if this is the first call.
+        """
         future = self._executor.submit(self._run_inference, frame)
         previous = self._pending
         self._pending = future
@@ -125,6 +214,12 @@ class AsyncDetector:
         return previous.result()
 
     def flush(self) -> Optional[DetectionResult]:
+        """Block until the last pending inference completes and return it.
+
+        Returns:
+            The final :class:`DetectionResult`, or ``None`` if no inference
+            is pending.
+        """
         if self._pending is None:
             return None
         result = self._pending.result()
@@ -132,10 +227,26 @@ class AsyncDetector:
         return result
 
     def shutdown(self) -> None:
+        """Shut down the thread-pool executor, waiting for in-flight work."""
         self._executor.shutdown(wait=True)
 
 
 class ReIDHelper:
+    """Schedules OSNet Re-ID embedding extraction for top-K detections.
+
+    Only a subset of detections receive embeddings each frame to limit GPU
+    load: the ``max_candidates`` highest-confidence detections plus any
+    detections that overlap the current target bounding-box by at least
+    ``target_iou``.
+
+    Args:
+        embedder: Initialised :class:`OSNetEmbedder`, or ``None`` to disable
+            Re-ID (``build_embeddings`` will always return ``None``).
+        max_candidates: Maximum number of detections to embed per frame.
+        target_iou: IoU overlap threshold for including low-confidence
+            detections that may be near the tracked target.
+    """
+
     def __init__(
         self,
         embedder: Optional["OSNetEmbedder"],
@@ -152,6 +263,21 @@ class ReIDHelper:
         detections: np.ndarray,
         target_bbox: Optional[np.ndarray],
     ) -> Optional[list[Optional[np.ndarray]]]:
+        """Extract Re-ID features for a subset of *detections*.
+
+        Args:
+            frame: Full-resolution BGR frame used to crop detection regions.
+            detections: Array of shape ``(N, 6)`` from the detector.
+            target_bbox: Current tracked target bounding-box ``(x1,y1,x2,y2)``
+                used to prioritise nearby detections.  Pass ``None`` when no
+                target is currently locked.
+
+        Returns:
+            A list of length ``N`` where each element is either a 1-D
+            float32 feature vector or ``None`` (detection was not embedded).
+            Returns ``None`` entirely when Re-ID is disabled or *detections*
+            is empty.
+        """
         if self.embedder is None or detections is None or detections.size == 0:
             return None
         num_dets = len(detections)
