@@ -1,3 +1,13 @@
+"""Simplified multi-object tracker based on IoU and optional Re-ID matching.
+
+Implements a two-stage assignment strategy inspired by ByteTrack:
+
+1. **IoU matching** — high-confidence detections are matched to existing
+   tracks using the Hungarian algorithm on an IoU cost matrix.
+2. **Re-ID matching** — unmatched tracks and detections are matched using
+   cosine similarity of OSNet feature vectors, subject to a maximum centre
+   distance gate.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,8 +16,23 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
+from tracking.reid_strategy import (
+    CosineReIDMatchingStrategy,
+    ReIDMatchingStrategy,
+    ReIDStrategyConfig,
+)
+
 
 def _iou(a: np.ndarray, b: np.ndarray) -> float:
+    """Compute the intersection-over-union between two axis-aligned boxes.
+
+    Args:
+        a: Box in ``(x1, y1, x2, y2)`` format.
+        b: Box in ``(x1, y1, x2, y2)`` format.
+
+    Returns:
+        IoU score in ``[0.0, 1.0]``.
+    """
     x1 = max(a[0], b[0])
     y1 = max(a[1], b[1])
     x2 = min(a[2], b[2])
@@ -22,6 +47,16 @@ def _iou(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _iou_matrix(tracks: List["_Track"], detections: np.ndarray) -> np.ndarray:
+    """Build a pairwise IoU matrix between *tracks* and *detections*.
+
+    Args:
+        tracks: Active track objects.
+        detections: Detection array of shape ``(M, 6+)``.
+
+    Returns:
+        Float32 array of shape ``(len(tracks), M)`` where entry ``[i, j]``
+        is the IoU score between track ``i`` and detection ``j``.
+    """
     if not tracks or len(detections) == 0:
         return np.zeros((len(tracks), len(detections)), dtype=np.float32)
     matrix = np.zeros((len(tracks), len(detections)), dtype=np.float32)
@@ -33,6 +68,18 @@ def _iou_matrix(tracks: List["_Track"], detections: np.ndarray) -> np.ndarray:
 
 @dataclass
 class _Track:
+    """Internal per-track state maintained by :class:`ByteTrack`.
+
+    Attributes:
+        track_id: Unique integer identifier assigned at track creation.
+        bbox: Latest bounding-box in ``(x1, y1, x2, y2)`` format (float32).
+        score: Detection confidence at the last successful match.
+        class_id: Detector class index (``-1`` if unavailable).
+        hits: Total number of successful matches since creation.
+        time_since_update: Frames elapsed since the last match.
+        feature: EMA-smoothed L2-normalised Re-ID embedding, or ``None``.
+    """
+
     track_id: int
     bbox: np.ndarray
     score: float
@@ -51,6 +98,20 @@ class _Track:
         min_similarity: float,
         similarity: float,
     ) -> None:
+        """Update the track with a new matched detection.
+
+        Args:
+            bbox: New bounding-box ``(x1, y1, x2, y2)``.
+            score: Detection confidence.
+            class_id: Detector class index.
+            feature: L2-normalised Re-ID embedding for this detection, or
+                ``None`` if Re-ID is disabled or extraction failed.
+            momentum: EMA momentum for feature blending (``[0, 1)``).
+            min_similarity: Minimum cosine similarity required to accept an
+                incoming feature into the EMA.
+            similarity: Cosine similarity between the incoming feature and the
+                stored feature; used to gate the EMA update.
+        """
         self.bbox = bbox.astype(np.float32)
         self.score = float(score)
         self.class_id = int(class_id)
@@ -69,11 +130,29 @@ class _Track:
                     self.feature = (blended / norm).astype(np.float32)
 
     def step(self) -> None:
+        """Increment ``time_since_update`` by one (called every frame)."""
         self.time_since_update += 1
 
 
 class ByteTrack:
-    """簡化版多目標追蹤器 (基於 IoU 匹配)。"""
+    """Simplified multi-object tracker based on IoU and optional Re-ID matching.
+
+    Args:
+        track_thresh: Minimum detection confidence to create a new track.
+        match_iou_thresh: Minimum IoU required for an IoU-stage match.
+        max_age: Frames a track may survive without a match before removal.
+        min_hits: Minimum successful matches before a track is "confirmed".
+        enable_reid: Whether to use Re-ID embeddings in the second matching
+            stage.
+        reid_match_thresh: Minimum cosine similarity for a Re-ID match.
+        feature_momentum: EMA momentum for track feature updates.
+        feature_min_similarity: Minimum similarity to accept an incoming
+            feature into the EMA.
+        reid_max_center_dist: Maximum normalised centre distance (relative to
+            the frame diagonal) allowed for a Re-ID match candidate.
+        reid_strategy: Optional pluggable Re-ID matching strategy. Defaults
+            to :class:`CosineReIDMatchingStrategy`.
+    """
 
     def __init__(
         self,
@@ -86,6 +165,7 @@ class ByteTrack:
         feature_momentum: float = 0.9,
         feature_min_similarity: float = 0.55,
         reid_max_center_dist: float = 0.35,
+        reid_strategy: Optional[ReIDMatchingStrategy] = None,
     ) -> None:
         self.track_thresh = track_thresh
         self.match_iou_thresh = match_iou_thresh
@@ -96,6 +176,12 @@ class ByteTrack:
         self.feature_momentum = feature_momentum
         self.feature_min_similarity = feature_min_similarity
         self.reid_max_center_dist = max(0.0, float(reid_max_center_dist))
+        self.reid_strategy: ReIDMatchingStrategy = reid_strategy or CosineReIDMatchingStrategy(
+            ReIDStrategyConfig(
+                match_thresh=self.reid_match_thresh,
+                max_center_dist=self.reid_max_center_dist,
+            )
+        )
         self._next_id = 1
         self._tracks: List[_Track] = []
 
@@ -105,6 +191,23 @@ class ByteTrack:
         img_size: Iterable[int],
         embeddings: Optional[Sequence[Optional[np.ndarray]]] = None,
     ) -> List[dict]:
+        """Run one tracking step given new detections.
+
+        Args:
+            detections: Array of shape ``(N, 6)`` — columns are
+                ``x1, y1, x2, y2, confidence, class_id``.  Pass ``None``
+                or an empty array for frames with no detections.
+            img_size: ``(height, width)`` of the frame; used to normalise
+                positions for the spatial gate in Re-ID matching.
+            embeddings: Per-detection Re-ID feature list of length ``N``.
+                Each element is either a float32 feature vector or ``None``.
+                Pass ``None`` to disable Re-ID for this step.
+
+        Returns:
+            List of track dicts with keys: ``track_id``, ``bbox``,
+            ``score``, ``class_id``, ``is_confirmed``, ``feature``,
+            ``time_since_update``.
+        """
         height = width = 1
         if img_size is not None:
             size_seq = list(img_size)
@@ -112,6 +215,13 @@ class ByteTrack:
                 height, width = int(size_seq[0]), int(size_seq[1])
         diag = float(np.hypot(width, height)) + 1e-6
         max_center_dist = self.reid_max_center_dist * diag
+        if isinstance(self.reid_strategy, CosineReIDMatchingStrategy):
+            self.reid_strategy = CosineReIDMatchingStrategy(
+                ReIDStrategyConfig(
+                    match_thresh=self.reid_match_thresh,
+                    max_center_dist=max_center_dist,
+                )
+            )
         dets = (
             detections[:, :6] if detections is not None else np.empty((0, 6), dtype=np.float32)
         )
@@ -180,37 +290,11 @@ class ByteTrack:
                 if features[idx] is not None
             ]
             if track_candidates and det_candidates:
-                cost_matrix = np.ones((len(track_candidates), len(det_candidates)), dtype=np.float32)
-                for i, (_, track) in enumerate(track_candidates):
-                    track_feat = track.feature
-                    for j, (det_idx, det_feat) in enumerate(det_candidates):
-                        if det_feat is None or track_feat is None:
-                            cost_matrix[i, j] = 1.0
-                            continue
-                        det_bbox = dets[det_idx][:4]
-                        track_bbox = track.bbox
-                        if track.class_id >= 0 and dets[det_idx].shape[0] > 5:
-                            det_class = int(dets[det_idx][5])
-                            if det_class != track.class_id:
-                                cost_matrix[i, j] = 1.0
-                                continue
-                        if self.reid_max_center_dist > 0:
-                            cx_t = float((track_bbox[0] + track_bbox[2]) * 0.5)
-                            cy_t = float((track_bbox[1] + track_bbox[3]) * 0.5)
-                            cx_d = float((det_bbox[0] + det_bbox[2]) * 0.5)
-                            cy_d = float((det_bbox[1] + det_bbox[3]) * 0.5)
-                            dist = float(np.hypot(cx_t - cx_d, cy_t - cy_d))
-                            if dist > max_center_dist:
-                                cost_matrix[i, j] = 1.0
-                                continue
-                        similarity = float(np.dot(track_feat, det_feat)) if track_feat is not None else 0.0
-                        cost_matrix[i, j] = 1.0 - similarity
-                row_ind, col_ind = linear_sum_assignment(cost_matrix)
-                for r, c in zip(row_ind, col_ind):
-                    track_idx, track_obj = track_candidates[r]
-                    det_idx, det_feat = det_candidates[c]
-                    similarity = 1.0 - cost_matrix[r, c]
-                    if similarity < self.reid_match_thresh:
+                strategy_matches = self.reid_strategy.match(track_candidates, det_candidates, dets)
+                for track_idx, det_idx, similarity in strategy_matches:
+                    track_obj = confirmed_tracks[track_idx]
+                    det_feat = features[det_idx]
+                    if det_feat is None:
                         continue
                     det = dets[det_idx]
                     track_obj.update(
@@ -261,6 +345,16 @@ class ByteTrack:
 
     @staticmethod
     def as_xyxy(tracks: List[dict]) -> np.ndarray:
+        """Convert a list of track dicts to a dense ``(N, 6)`` array.
+
+        Args:
+            tracks: Track dicts as returned by :meth:`update`.
+
+        Returns:
+            Float32 array of shape ``(N, 6)`` with columns
+            ``x1, y1, x2, y2, score, track_id``.  Returns an empty
+            ``(0, 6)`` array when *tracks* is empty.
+        """
         if not tracks:
             return np.empty((0, 6), dtype=np.float32)
         rows = []
