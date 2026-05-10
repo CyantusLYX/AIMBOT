@@ -348,7 +348,7 @@ def main() -> None:
     next_frame_time: Optional[float] = time.time() if target_period > 0 else None
 
     def process_result(result_frame: np.ndarray, detections: np.ndarray) -> bool:
-        nonlocal frame_count, last_frame_time, last_control_time, next_frame_time
+        nonlocal frame_count, last_frame_time, last_control_time, next_frame_time, viewer
         if viewer is not None and not viewer.is_open():
             print("視窗已關閉，停止播放。")
             return False
@@ -383,7 +383,7 @@ def main() -> None:
             gimbal.send(pan_cmd, tilt_cmd)
 
         if viewer is not None:
-            viewer.render(
+            rendered = viewer.render(
                 result_frame,
                 tracks,
                 target_ctrl.target_id,
@@ -391,6 +391,11 @@ def main() -> None:
                 secondary_target_ids=target_ctrl.target_ids,
                 lifecycle_state=target_ctrl.lifecycle_state.value.upper(),
             )
+            if not rendered:
+                print("警告: OpenCV 視窗輸出失敗，已切換為 no-display 模式繼續執行。")
+                viewer.close()
+                viewer = None
+                return True
             key = viewer.wait_key(1)
             if key in (ord("q"), 27):
                 return False

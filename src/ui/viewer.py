@@ -42,7 +42,7 @@ class OpenCVViewer:
         fps: Optional[float] = None,
         secondary_target_ids: Optional[Set[int]] = None,
         lifecycle_state: Optional[str] = None,
-    ) -> None:
+    ) -> bool:
         """Draw tracking overlays and display the frame.
 
         Colour scheme:
@@ -60,7 +60,7 @@ class OpenCVViewer:
             lifecycle_state: Optional target lifecycle state string to render.
         """
         if not self.is_open():
-            return
+            return False
 
         output = frame.copy()
         for track in tracks:
@@ -121,11 +121,15 @@ class OpenCVViewer:
                 2,
                 cv2.LINE_AA,
             )
-        cv2.imshow(self.window_name, output)
-        self._has_rendered = True
+        try:
+            cv2.imshow(self.window_name, output)
+            self._has_rendered = True
+        except cv2.error:
+            self._closed = True
+            return False
+        return True
 
-    @staticmethod
-    def wait_key(delay: int = 1) -> int:
+    def wait_key(self, delay: int = 1) -> int:
         """Wrapper around ``cv2.waitKey`` that masks to the low 8 bits.
 
         Args:
@@ -134,7 +138,11 @@ class OpenCVViewer:
         Returns:
             Key code in ``[0, 255]``, or ``255`` if no key was pressed.
         """
-        return cv2.waitKey(delay) & 0xFF
+        try:
+            return cv2.waitKey(delay) & 0xFF
+        except cv2.error:
+            self._closed = True
+            return 27
 
     def is_open(self) -> bool:
         """Return ``True`` if the window is still visible.
@@ -159,5 +167,8 @@ class OpenCVViewer:
     def close(self) -> None:
         """Destroy the OpenCV window and mark the viewer as closed."""
         if not self._closed:
-            cv2.destroyWindow(self.window_name)
+            try:
+                cv2.destroyWindow(self.window_name)
+            except cv2.error:
+                pass
             self._closed = True
