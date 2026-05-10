@@ -21,6 +21,7 @@ class OpenCVViewer:
         self._clicks: Deque[Tuple[int, int]] = deque(maxlen=5)
         self._closed = False
         self._has_rendered = False
+        self._window_sized = False
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
         cv2.setMouseCallback(self.window_name, self._on_mouse)
 
@@ -63,6 +64,11 @@ class OpenCVViewer:
             return False
 
         output = frame.copy()
+        height, width = output.shape[:2]
+        font_scale = max(0.75, min(1.4, min(width, height) / 720.0))
+        label_scale = max(0.65, font_scale * 0.75)
+        text_thickness = max(2, int(round(font_scale * 2.0)))
+        box_thickness = max(2, int(round(font_scale * 2.5)))
         for track in tracks:
             tid = track["track_id"]
             age = int(track.get("time_since_update", 0))
@@ -80,15 +86,15 @@ class OpenCVViewer:
 
             if is_primary:
                 color = (0, 255, 0) if age == 0 else (0, 165, 255)  # green / orange
-                thickness = 3
+                thickness = box_thickness + 1
                 label = f"TARGET {tid}"
             elif is_secondary:
                 color = (0, 255, 255)  # yellow
-                thickness = 2
+                thickness = box_thickness
                 label = f"MATCH {tid}"
             else:
                 color = (255, 0, 0)  # blue
-                thickness = 1
+                thickness = max(1, box_thickness - 1)
                 label = f"ID {tid}"
 
             cv2.rectangle(output, (x1, y1), (x2, y2), color, thickness)
@@ -96,31 +102,55 @@ class OpenCVViewer:
             if is_primary and age > 0:
                 label += f" (LOST {age})"
 
-            cv2.putText(output, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+            label_y = max(24, y1 - 8)
+            cv2.putText(
+                output,
+                label,
+                (x1, label_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                label_scale,
+                color,
+                max(1, text_thickness - 1),
+                cv2.LINE_AA,
+            )
 
+        status_lines = []
         if fps is not None and fps > 0:
-            cv2.putText(
-                output,
-                f"FPS: {fps:.1f}",
-                (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (0, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
-
+            status_lines.append(f"FPS {fps:.1f}")
         if lifecycle_state:
-            cv2.putText(
-                output,
-                f"STATE: {lifecycle_state}",
-                (10, 60),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
+            status_lines.append(f"STATE {lifecycle_state}")
+
+        if status_lines:
+            line_height = int(round(32 * font_scale))
+            panel_width = min(width - 20, int(round(360 * font_scale)))
+            panel_height = 16 + line_height * len(status_lines)
+            overlay = output.copy()
+            cv2.rectangle(overlay, (8, 8), (8 + panel_width, 8 + panel_height), (0, 0, 0), -1)
+            output = cv2.addWeighted(overlay, 0.45, output, 0.55, 0)
+            y = 8 + int(round(26 * font_scale))
+            for line in status_lines:
+                color = (0, 255, 255) if line.startswith("FPS") else (255, 255, 255)
+                cv2.putText(
+                    output,
+                    line,
+                    (18, y),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    font_scale,
+                    color,
+                    text_thickness,
+                    cv2.LINE_AA,
+                )
+                y += line_height
+
+        if not self._window_sized:
+            display_width = min(width, 1280)
+            display_height = max(1, int(round(height * (display_width / float(max(width, 1))))))
+            try:
+                cv2.resizeWindow(self.window_name, display_width, display_height)
+            except cv2.error:
+                pass
+            self._window_sized = True
+
         try:
             cv2.imshow(self.window_name, output)
             self._has_rendered = True
