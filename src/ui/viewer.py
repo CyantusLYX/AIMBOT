@@ -16,12 +16,14 @@ class OpenCVViewer:
         window_name: Title of the OS window. Defaults to ``"AIMBOT"``.
     """
 
-    def __init__(self, window_name: str = "AIMBOT") -> None:
+    def __init__(self, window_name: str = "AIMBOT", display_width: int = 640) -> None:
         self.window_name = window_name
+        self.display_width = max(160, int(display_width))
         self._clicks: Deque[Tuple[int, int]] = deque(maxlen=5)
         self._closed = False
         self._has_rendered = False
         self._window_sized = False
+        self._display_to_frame = (1.0, 1.0)
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
         cv2.setMouseCallback(self.window_name, self._on_mouse)
         try:
@@ -37,7 +39,9 @@ class OpenCVViewer:
         """Return and consume the most recent left-click, or ``None``."""
         if not self._clicks:
             return None
-        return self._clicks.pop()
+        x, y = self._clicks.pop()
+        scale_x, scale_y = self._display_to_frame
+        return int(round(x * scale_x)), int(round(y * scale_y))
 
     def render(
         self,
@@ -146,9 +150,16 @@ class OpenCVViewer:
                 )
                 y += line_height
 
+        display_width = min(width, self.display_width)
+        display_height = max(1, int(round(height * (display_width / float(max(width, 1))))))
+        if display_width != width or display_height != height:
+            output = cv2.resize(output, (display_width, display_height), interpolation=cv2.INTER_AREA)
+        self._display_to_frame = (
+            float(width) / float(max(display_width, 1)),
+            float(height) / float(max(display_height, 1)),
+        )
+
         if not self._window_sized:
-            display_width = min(width, 1280)
-            display_height = max(1, int(round(height * (display_width / float(max(width, 1))))))
             try:
                 cv2.resizeWindow(self.window_name, display_width, display_height)
             except cv2.error:

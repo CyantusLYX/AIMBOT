@@ -58,6 +58,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-height", type=int, default=runtime.camera_height, help="攝影機輸入高度")
     parser.add_argument("--camera-fps", type=int, default=runtime.camera_fps, help="攝影機輸入 FPS")
     parser.add_argument("--no-display", action="store_true", help="不開 OpenCV 視窗，適合 SSH smoke test")
+    parser.add_argument("--display-width", type=int, default=runtime.display_width, help="OpenCV 顯示寬度；降低可改善 SSH 顯示 FPS")
+    parser.add_argument("--render-every", type=int, default=runtime.render_every, help="每 N 個處理 frame 才刷新一次視窗")
+    parser.add_argument("--profile", action="store_true", help="印出 pipeline 各階段平均耗時")
     parser.add_argument("--debug-frame-dir", type=str, default=runtime.debug_frame_dir, help="儲存偵錯 frame 到指定資料夾")
     parser.add_argument(
         "--backend",
@@ -110,6 +113,9 @@ def build_runtime_config(args: argparse.Namespace) -> PipelineConfig:
             camera_height=args.camera_height,
             camera_fps=args.camera_fps,
             no_display=args.no_display,
+            display_width=args.display_width,
+            render_every=args.render_every,
+            profile=args.profile,
             debug_frame_dir=args.debug_frame_dir,
             trt_input_shape=args.trt_input_shape,
             trt_output_format=args.trt_output_format,
@@ -386,6 +392,8 @@ def main() -> None:
     running = True
     frame_count = 0
     saved_result_debug = False
+    render_every = max(1, int(runtime.render_every))
+    profile_stats = {"infer_wait": 0.0, "tracking": 0.0, "render": 0.0, "count": 0}
     last_frame_time: Optional[float] = None
     last_control_time: Optional[float] = None
     next_frame_time: Optional[float] = time.time() if target_period > 0 else None
@@ -404,6 +412,7 @@ def main() -> None:
         last_frame_time = now
         fps_value = fps_meter.update(frame_dt)
 
+        tracking_start = time.time()
         tracks = tracking_service.update(result_frame, detections, target_ctrl.last_bbox)
 
         if mode == "2" and target_ctrl.target_id is None:
@@ -413,6 +422,8 @@ def main() -> None:
             target_ctrl.search_and_lock(tracks, frame=result_frame)
 
         target_ctrl.maintain(tracks)
+        if runtime.profile:
+            profile_stats["tracking"] += time.time() - tracking_start
 
         click = viewer.poll_click() if viewer is not None else None
         if click is not None:
@@ -427,10 +438,12 @@ def main() -> None:
             tilt_cmd = pid_tilt.update(err_y, ctrl_dt)
             gimbal.send(pan_cmd, tilt_cmd)
 
-        if display_enabled and viewer is None:
-            viewer = OpenCVViewer()
+        should_render = frame_count % render_every == 0
+        if display_enabled and should_render and viewer is None:
+            viewer = OpenCVViewer(display_width=runtime.display_width)
 
-        if viewer is not None:
+        if viewer is not None and should_render:
+            render_start = time.time()
             rendered = viewer.render(
                 result_frame,
                 tracks,
@@ -446,6 +459,8 @@ def main() -> None:
                 display_enabled = False
                 return True
             key = viewer.wait_key(1)
+            if runtime.profile:
+                profile_stats["render"] += time.time() - render_start
             if key in (ord("q"), 27):
                 return False
 
@@ -463,6 +478,15 @@ def main() -> None:
 
         if fps_value > 0 and frame_count % max(runtime.fps, 30) == 0:
             print(f"近期平均 FPS: {fps_value:.1f}")
+            if runtime.profile and profile_stats["count"] > 0:
+                count = float(profile_stats["count"])
+                print(
+                    "profile avg ms: infer_wait={:.1f} tracking={:.1f} render={:.1f}".format(
+                        profile_stats["infer_wait"] * 1000.0 / count,
+                        profile_stats["tracking"] * 1000.0 / count,
+                        profile_stats["render"] * 1000.0 / max(count / render_every, 1.0),
+                    )
+                )
         return True
 
     detector_worker.submit(first_frame)
@@ -479,7 +503,11 @@ def main() -> None:
                 ret, frame = prefetcher.read()
                 if not ret:
                     break
+                infer_wait_start = time.time()
                 ready = detector_worker.submit(frame)
+                if runtime.profile:
+                    profile_stats["infer_wait"] += time.time() - infer_wait_start
+                    profile_stats["count"] += 1
                 if ready is None:
                     continue
                 running = process_result(ready.frame, ready.detections)

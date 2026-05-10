@@ -15,6 +15,9 @@ class RuntimeConfig:
     camera_height: int = 720
     camera_fps: int = 30
     no_display: bool = False
+    display_width: int = 640
+    render_every: int = 1
+    profile: bool = False
     debug_frame_dir: Optional[str] = None
     trt_input_shape: str = "640x640"
     trt_output_format: str = "auto"
