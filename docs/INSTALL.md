@@ -8,6 +8,9 @@
 | CUDA Driver | 12.x 或 13.x（執行 `nvidia-smi` 確認） |
 | uv          | `pip install uv`                       |
 
+Jetson Nano / JetPack 4.x 不適用此桌機安裝流程；請使用
+[Jetson Nano TensorRT Bring-up](JETSON_NANO_TENSORRT.md)。
+
 ---
 
 ## 快速安裝 / Quick Install
@@ -81,10 +84,11 @@ Visual C++ Redistributable 未安裝。從 Microsoft 下載安裝最新版本。
 
 ### `numpy` 版本衝突
 
-本專案限制 `numpy>=1.24.0,<2.0.0`。numpy 2.x 與 YOLOv7 的 C-extension 不相容。
+本專案限制 `numpy>=1.21.0,<1.24.0`。numpy 1.24+ 移除了部分 YOLOv7 /
+torchreid 仍會碰到的舊 API。
 
 ```powershell
-uv pip install "numpy>=1.24.0,<2.0.0"
+uv pip install "numpy>=1.21.0,<1.24.0"
 ```
 
 ### `torchreid` / `protobuf` 版本衝突

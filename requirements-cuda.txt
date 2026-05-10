@@ -1,4 +1,9 @@
-# GPU / CUDA-oriented dependencies.
+# Desktop GPU / CUDA-oriented dependencies.
+#
+# Do not use this file on Jetson Nano / JetPack 4.x.  JetPack 4.6.x ships
+# CUDA 10.2-era packages and cannot use upstream torch>=2 CUDA wheels.  For
+# TensorRT testing on Nano, use requirements-jetson.txt and a serialized
+# .engine file instead.
 #
 # Install these after selecting the PyTorch wheel index that matches your CUDA
 # runtime. Example for CUDA 12.1:

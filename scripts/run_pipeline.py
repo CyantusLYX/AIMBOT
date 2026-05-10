@@ -1,12 +1,10 @@
-from __future__ import annotations
-
 import argparse
 import sys
 import time
 from collections import deque
 from dataclasses import replace
 from pathlib import Path
-from typing import Deque, Optional
+from typing import Deque, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -50,6 +48,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weights", type=str, default=runtime.weights, help="YOLOv7 權重路徑")
     parser.add_argument("--source", type=str, default=runtime.source, help="攝影機索引或影片路徑")
     parser.add_argument("--device", type=str, default=runtime.device, help="指定裝置，例如 cuda:0")
+    parser.add_argument(
+        "--backend",
+        choices=("torch", "tensorrt", "auto"),
+        default=runtime.detector_backend,
+        help="偵測 backend。auto 會依 .engine/.plan 自動選 TensorRT",
+    )
+    parser.add_argument("--conf-thres", type=float, default=runtime.conf_threshold, help="偵測 confidence 閾值")
+    parser.add_argument("--iou-thres", type=float, default=runtime.iou_threshold, help="NMS IoU 閾值")
+    parser.add_argument(
+        "--trt-input-shape",
+        type=str,
+        default=runtime.trt_input_shape,
+        help="TensorRT 動態 engine 的輸入 shape，例如 640x640 或 1x3x640x640",
+    )
+    parser.add_argument(
+        "--trt-output-format",
+        choices=("auto", "raw", "nms"),
+        default=runtime.trt_output_format,
+        help="TensorRT 輸出格式。raw=(N,85+) 後處理；nms=engine 已含 NMS",
+    )
     parser.add_argument("--person-only", action="store_true", help="僅保留 person 類別")
     parser.add_argument("--half", action="store_true", help="啟用半精度推論 (僅限 CUDA)")
     parser.add_argument("--enable-reid", action="store_true", help="啟用 OSNet Re-ID")
@@ -75,6 +93,11 @@ def build_runtime_config(args: argparse.Namespace) -> PipelineConfig:
             weights=args.weights,
             source=args.source,
             device=args.device,
+            detector_backend=args.backend,
+            trt_input_shape=args.trt_input_shape,
+            trt_output_format=args.trt_output_format,
+            conf_threshold=args.conf_thres,
+            iou_threshold=args.iou_thres,
             person_only=args.person_only,
             half=args.half,
             enable_reid=args.enable_reid,
@@ -110,23 +133,70 @@ def select_mode(runtime):
     return mode, runtime, reference_image_path
 
 
-def create_detector_and_embedder(runtime):
-    try:
-        from detection.detector import YoloV7Detector
-    except ModuleNotFoundError as exc:
-        if exc.name == "torch":
-            print("錯誤: 偵測模組需要 torch，但目前環境未安裝。")
-            print("建議修復:")
-            print("  uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121")
-            print("  或 CPU 版本: uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu")
-            raise SystemExit(1) from exc
-        raise
+def _parse_trt_input_shape(value: str) -> Tuple[int, ...]:
+    parts = value.lower().replace(",", "x").split("x")
+    dims = tuple(int(part.strip()) for part in parts if part.strip())
+    if len(dims) not in (2, 3, 4):
+        raise ValueError("--trt-input-shape 請使用 HxW、CxHxW 或 NxCxHxW，例如 640x640")
+    return dims
 
-    detector = YoloV7Detector(weights_path=runtime.weights, device=runtime.device, use_half=runtime.half)
+
+def _select_detector_backend(runtime) -> str:
+    backend = runtime.detector_backend.lower()
+    if backend != "auto":
+        return backend
+    suffix = Path(runtime.weights).suffix.lower()
+    if suffix in (".engine", ".plan", ".trt"):
+        return "tensorrt"
+    return "torch"
+
+
+def create_detector_and_embedder(runtime):
+    backend = _select_detector_backend(runtime)
+    if backend == "tensorrt":
+        try:
+            from detection.tensorrt_detector import TensorRTYoloDetector
+        except ModuleNotFoundError as exc:
+            print("錯誤: TensorRT backend 需要 tensorrt / pycuda，但目前環境未安裝。")
+            print("JetPack 4.6 建議: sudo apt install python3-libnvinfer libnvinfer-bin python3-pycuda")
+            raise SystemExit(1) from exc
+        try:
+            detector = TensorRTYoloDetector(
+                engine_path=runtime.weights,
+                device=runtime.device,
+                input_shape=_parse_trt_input_shape(runtime.trt_input_shape),
+                conf_threshold=runtime.conf_threshold,
+                iou_threshold=runtime.iou_threshold,
+                output_format=runtime.trt_output_format,
+            )
+        except ImportError as exc:
+            print(exc)
+            raise SystemExit(1) from exc
+    else:
+        try:
+            from detection.detector import YoloV7Detector
+        except ModuleNotFoundError as exc:
+            if exc.name == "torch":
+                print("錯誤: PyTorch backend 需要 torch，但目前環境未安裝。")
+                print("桌機 CUDA 建議:")
+                print("  uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121")
+                print("JetPack 4.x 請改用 --backend tensorrt，或安裝 NVIDIA Jetson 專用 PyTorch wheel。")
+                raise SystemExit(1) from exc
+            raise
+
+        detector = YoloV7Detector(
+            weights_path=runtime.weights,
+            device=runtime.device,
+            conf_threshold=runtime.conf_threshold,
+            iou_threshold=runtime.iou_threshold,
+            use_half=runtime.half,
+        )
+
     if detector.device.startswith("cuda"):
         detector.warmup()
     if runtime.half and not detector.using_half:
-        print("警告: --half 僅在 CUDA 裝置上有效，已回退至 float32")
+        print("警告: --half 僅在 CUDA/FP16 engine 上有效，已回退至 float32")
+    print(f"使用推論 backend: {backend}")
     print(f"使用推論裝置: {detector.device}{' (FP16)' if detector.using_half else ''}")
 
     embedder = None
@@ -182,7 +252,7 @@ def create_class_filter(person_only: bool):
     return None
 
 
-def _parse_major_minor(version_text: str) -> tuple[int, int] | None:
+def _parse_major_minor(version_text: str) -> Optional[Tuple[int, int]]:
     raw = version_text.split("+", 1)[0]
     parts = raw.split(".")
     if len(parts) < 2:

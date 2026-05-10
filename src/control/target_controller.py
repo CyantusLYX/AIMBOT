@@ -5,11 +5,10 @@ the PID loop.  It maintains a primary target ID, counts lost frames, and
 uses a combined Re-ID / colour / ORB score to re-acquire the target after
 transient occlusions.
 """
-from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
@@ -66,7 +65,7 @@ class TargetController:
         reacquire_thresh: float = 0.6,
         debug: bool = False,
     ) -> None:
-        self.target_ids: set[int] = set()
+        self.target_ids: Set[int] = set()
         self.primary_target_id: Optional[int] = None
         self.cached_feature: Optional[np.ndarray] = None
         self._lost_frames: int = 0

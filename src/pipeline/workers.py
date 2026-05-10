@@ -8,14 +8,12 @@ reading from GPU-bound detection inference:
 - ``AsyncDetector`` — single-worker thread-pool for YOLOv7 inference.
 - ``ReIDHelper`` — schedules OSNet embedding extraction for top-K detections.
 """
-from __future__ import annotations
-
 import concurrent.futures
 import queue
 import threading
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Iterable, Optional
+from typing import TYPE_CHECKING, Callable, List, Optional
 
 import cv2
 import numpy as np
@@ -69,7 +67,7 @@ class FramePrefetcher:
                 break
             self._queue.put(frame)
 
-    def read(self) -> tuple[bool, Optional[np.ndarray]]:
+    def read(self) -> tuple:
         """Block until a frame is available and return it.
 
         Returns:
@@ -229,6 +227,9 @@ class AsyncDetector:
     def shutdown(self) -> None:
         """Shut down the thread-pool executor, waiting for in-flight work."""
         self._executor.shutdown(wait=True)
+        close = getattr(self.detector, "close", None)
+        if callable(close):
+            close()
 
 
 class ReIDHelper:
@@ -262,7 +263,7 @@ class ReIDHelper:
         frame: np.ndarray,
         detections: np.ndarray,
         target_bbox: Optional[np.ndarray],
-    ) -> Optional[list[Optional[np.ndarray]]]:
+    ) -> Optional[List[Optional[np.ndarray]]]:
         """Extract Re-ID features for a subset of *detections*.
 
         Args:
@@ -291,7 +292,7 @@ class ReIDHelper:
                 order = np.unique(np.concatenate([order, np.array(overlaps, dtype=np.int32)]))
         boxes = detections[order, :4]
         feats = self.embedder.extract_from_frame(frame, boxes)
-        result: list[Optional[np.ndarray]] = [None] * num_dets
+        result: List[Optional[np.ndarray]] = [None] * num_dets
         for det_idx, feat in zip(order, feats):
             result[int(det_idx)] = feat
         return result

@@ -8,7 +8,6 @@ Implements a two-stage assignment strategy inspired by ByteTrack:
    cosine similarity of OSNet feature vectors, subject to a maximum centre
    distance gate.
 """
-from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Sequence, Tuple

@@ -4,10 +4,14 @@ This module isolates Re-ID cost computation and assignment policy from
 ``ByteTrack`` so different matching strategies can be plugged in without
 modifying tracker control flow.
 """
-from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Protocol, Sequence, Tuple
+from typing import List, Tuple
+
+try:
+    from typing import Protocol
+except ImportError:  # pragma: no cover - Python 3.6 compatibility
+    from typing_extensions import Protocol
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment

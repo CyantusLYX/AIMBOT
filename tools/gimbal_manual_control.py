@@ -10,14 +10,12 @@ Controls:
   Q or Esc: quit
 """
 
-from __future__ import annotations
-
 import argparse
 import math
 import sys
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 pygame = None
 serial = None
@@ -160,7 +158,7 @@ def ramp_toward(current: float, target: float, max_delta: float) -> float:
     return current + math.copysign(max_delta, delta)
 
 
-def read_keyboard_target(max_speed: int) -> tuple[float, float]:
+def read_keyboard_target(max_speed: int) -> Tuple[float, float]:
     keys = pygame.key.get_pressed()
 
     pan_axis = 0
@@ -179,12 +177,12 @@ def read_keyboard_target(max_speed: int) -> tuple[float, float]:
 
 
 def read_joystick_target(
-    joystick: Optional[pygame.joystick.Joystick],
+    joystick: Optional[object],
     max_speed: int,
     deadzone: float,
     expo: float,
     invert_tilt: bool,
-) -> tuple[float, float]:
+) -> Tuple[float, float]:
     if joystick is None:
         return 0.0, 0.0
 
@@ -197,9 +195,9 @@ def read_joystick_target(
 
 
 def choose_command_target(
-    keyboard_target: tuple[float, float],
-    joystick_target: tuple[float, float],
-) -> tuple[float, float]:
+    keyboard_target: Tuple[float, float],
+    joystick_target: Tuple[float, float],
+) -> Tuple[float, float]:
     joystick_active = abs(joystick_target[0]) > 0 or abs(joystick_target[1]) > 0
     if joystick_active:
         return joystick_target
@@ -207,8 +205,8 @@ def choose_command_target(
 
 
 def draw_status(
-    screen: pygame.Surface,
-    font: pygame.font.Font,
+    screen: object,
+    font: object,
     state: CommandState,
     joystick_name: str,
     dry_run: bool,

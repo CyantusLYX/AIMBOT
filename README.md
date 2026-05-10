@@ -107,7 +107,7 @@ docs/
 | 管線工人 / Pipeline workers (`pipeline/workers.py`)     | ✅ async inference           |
 | OpenCV UI (`ui/viewer.py`)                              | ✅ overlays + click          |
 | 集中設定 / Centralised config (`core/config.py`)        | ✅ frozen dataclasses        |
-| TensorRT 加速 / TensorRT acceleration                   | ⏳ planned                   |
+| TensorRT 加速 / TensorRT acceleration                   | ✅ `.engine` runtime backend |
 | 實機 PID 校調 / Hardware PID tuning                     | ⏳ in progress               |
 
 ---
@@ -148,6 +148,24 @@ uv sync --extra reid
 ```powershell
 uv run python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 ```
+
+### Jetson Nano / TensorRT
+
+JetPack 4.6.x uses the L4T R32 / CUDA 10.2 generation and cannot use the
+desktop `torch>=2.0.0` CUDA requirements. For Nano TensorRT testing, install
+`requirements-jetson.txt`, build a `.engine` on the Jetson, then run:
+
+```bash
+python3 scripts/run_pipeline.py \
+    --backend tensorrt \
+    --weights models/epoch_149_fp16.engine \
+    --source 0 \
+    --device cuda \
+    --trt-output-format raw \
+    --dry-run
+```
+
+Full bring-up notes: [docs/JETSON_NANO_TENSORRT.md](docs/JETSON_NANO_TENSORRT.md).
 
 ### 方法二：pip / Method 2: pip
 
@@ -202,6 +220,11 @@ python scripts/run_pipeline.py \
 | `--weights`       | `models/epoch_149.pt` | YOLOv7 weight path                                    |
 | `--source`        | `0`                   | Video file path or camera index                       |
 | `--device`        | `cuda`                | Inference device (`cuda`, `cuda:0`, `cpu`)            |
+| `--backend`       | `auto`                | Detector backend (`torch`, `tensorrt`, `auto`)        |
+| `--conf-thres`    | `0.25`                | Detection confidence threshold                        |
+| `--iou-thres`     | `0.45`                | NMS IoU threshold                                     |
+| `--trt-input-shape` | `640x640`           | TensorRT dynamic input shape                          |
+| `--trt-output-format` | `auto`            | TensorRT output (`auto`, `raw`, `nms`)                |
 | `--half`          | off                   | Enable FP16 inference (CUDA only)                     |
 | `--person-only`   | off                   | Filter detections to `person` class only              |
 | `--dry-run`       | off                   | Print gimbal commands without opening serial port     |

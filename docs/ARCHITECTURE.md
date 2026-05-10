@@ -20,7 +20,7 @@ Video Source / Camera
         │  resized frames
         ▼
  AsyncDetector             (pipeline/workers.py)
-  YoloV7Detector in a     ◄── YoloV7Detector (detection/detector.py)
+  detector backend in a   ◄── YoloV7Detector / TensorRTYoloDetector
   single-worker thread pool
         │  DetectionResult(frame, detections[N,6])
         ▼
@@ -61,7 +61,8 @@ Side channel:
 
 | Module                 | Package     | Responsibility                                        |
 | ---------------------- | ----------- | ----------------------------------------------------- |
-| `detector.py`          | `detection` | YoloV7 inference + pre/post-processing                |
+| `detector.py`          | `detection` | YoloV7 PyTorch inference wrapper                      |
+| `tensorrt_detector.py` | `detection` | TensorRT engine inference + YOLO post-processing      |
 | `byte_tracker.py`      | `tracking`  | Multi-object IoU tracking + Re-ID matching            |
 | `osnet.py`             | `reid`      | OSNet feature extraction (batch, crop, encode)        |
 | `workers.py`           | `pipeline`  | Async detect, CUDA resize, Re-ID scheduling           |

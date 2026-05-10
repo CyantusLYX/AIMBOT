@@ -1,0 +1,18 @@
+# Jetson Nano / JetPack 4.x minimal runtime dependencies.
+#
+# Use this instead of requirements.txt / requirements-cuda.txt on JetPack 4.6.x.
+# Create the venv with --system-site-packages so Python can see NVIDIA's apt
+# packages for cv2, numpy, scipy, tensorrt, and pycuda.
+#
+#   python3 -m venv --system-site-packages .venv-jetson
+#   . .venv-jetson/bin/activate
+#   pip3 install -r requirements-jetson.txt
+#
+# Install system packages first:
+#
+#   sudo apt install python3-opencv python3-numpy python3-scipy \
+#     python3-libnvinfer libnvinfer-bin python3-pycuda
+
+dataclasses==0.8; python_version < "3.7"
+typing_extensions>=4.1.1,<4.2; python_version < "3.8"
+pyserial==3.5

@@ -37,20 +37,17 @@ uv run ruff check --fix .
 Order (enforced by `ruff`'s isort-compatible section rules):
 
 ```python
-# 1. future
-from __future__ import annotations
-
-# 2. stdlib
+# 1. stdlib
 import os
 import sys
 from typing import Optional, List
 
-# 3. third-party
+# 2. third-party
 import cv2
 import numpy as np
 import torch
 
-# 4. first-party (src/ packages declared in pyproject.toml known-first-party)
+# 3. first-party (src/ packages declared in pyproject.toml known-first-party)
 from core.config import PipelineConfig
 from detection.detector import YoloV7Detector
 ```
@@ -75,12 +72,11 @@ Rules:
 - Use `Optional[X]` rather than `X | None` for Python ≤ 3.9 compatibility
   (even though the project targets 3.11, the codebase uses `Optional` for
   consistency with historical code).
-- Use `from __future__ import annotations` at the top of every file to enable
-  PEP 563 deferred evaluation and allow forward references.
 - Use `typing.List`, `typing.Tuple`, `typing.Set`, etc., **not** the built-in
-  lowercase equivalents in function signatures (the built-in lowercase forms
-  are fine inside `from __future__ import annotations` contexts but `typing.*`
-  is preferred for clarity).
+  lowercase equivalents in function signatures. This keeps the TensorRT path
+  friendly to JetPack 4.x / Python 3.6.
+- Use quoted forward references when a type would otherwise require deferred
+  annotation evaluation.
 
 ---
 

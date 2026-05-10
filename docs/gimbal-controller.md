@@ -93,6 +93,8 @@ pip install -r requirements-cuda.txt
 ```
 
 Choose the PyTorch wheel index that matches the target machine's CUDA runtime.
+For Jetson Nano / JetPack 4.x TensorRT testing, use `requirements-jetson.txt`
+and `docs/JETSON_NANO_TENSORRT.md` instead of the desktop CUDA requirements.
 
 ## Safety Notes
 

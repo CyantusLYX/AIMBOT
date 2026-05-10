@@ -1,6 +1,5 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -9,17 +8,22 @@ class RuntimeConfig:
 
     weights: str = "models/epoch_149.pt"
     source: str = "0"
-    device: str | None = None
+    device: Optional[str] = None
+    detector_backend: str = "auto"
+    trt_input_shape: str = "640x640"
+    trt_output_format: str = "auto"
+    conf_threshold: float = 0.25
+    iou_threshold: float = 0.45
     person_only: bool = False
     half: bool = False
     enable_reid: bool = False
     process_scale: float = 1.0
     reid_model: str = "osnet_x0_5"
-    reid_weights: str | None = None
+    reid_weights: Optional[str] = None
     dry_run: bool = False
     serial_port: str = "COM3"
     fps: int = 30
-    max_frames: int | None = None
+    max_frames: Optional[int] = None
 
 
 @dataclass(frozen=True)

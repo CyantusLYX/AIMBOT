@@ -282,8 +282,8 @@ than the built-in `set[int]`.
 - Although Python 3.9+ supports `set[int]` as a generic alias, the `Set` import
   from `typing` is used consistently throughout the codebase for clarity in
   type annotations (see Style Guide §4).
-- `from __future__ import annotations` defers evaluation, so `set[int]` would
-  work at runtime, but the `typing.Set` form is easier for contributors
-  accustomed to pre-3.9 codebases.
+- The TensorRT Jetson path targets JetPack 4.x / Python 3.6, where
+  `from __future__ import annotations` is not available.  The `typing.Set`
+  form works in both desktop and Jetson runtimes.
 
 **Risk**: None — functionally identical.

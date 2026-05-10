@@ -1,7 +1,6 @@
 """Tracking domain service composing ByteTrack and optional Re-ID helper."""
-from __future__ import annotations
 
-from typing import Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -25,7 +24,7 @@ class TrackingService:
         frame: np.ndarray,
         detections: np.ndarray,
         target_bbox: Optional[np.ndarray],
-    ) -> list[dict]:
+    ) -> List[Dict]:
         """Compute current-frame tracks.
 
         Args:
