@@ -114,6 +114,9 @@ docs/
 
 ## 安裝 / Installation
 
+雲台韌體、序列協議、手動 joystick/keyboard 測試工具與安全注意事項請見
+[`docs/gimbal-controller.md`](docs/gimbal-controller.md)。
+
 ### 方法一：uv（推薦）/ Method 1: uv (recommended)
 
 [uv](https://docs.astral.sh/uv/) manages the virtual environment and all
@@ -154,8 +157,9 @@ python -m venv .venv
 pip install --upgrade pip
 pip install -r requirements.txt
 
-# CUDA PyTorch（先安裝 CUDA 版本再裝其餘依賴 / install before requirements.txt）
+# CUDA / Re-ID dependencies（GPU 推論需要）
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install -r requirements-cuda.txt
 ```
 
 ---

@@ -1,0 +1,15 @@
+# GPU / CUDA-oriented dependencies.
+#
+# Install these after selecting the PyTorch wheel index that matches your CUDA
+# runtime. Example for CUDA 12.1:
+#
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#   pip install -r requirements-cuda.txt
+#
+# If you already installed torch/torchvision manually, pip will keep compatible
+# installed versions that satisfy the constraints below.
+torch>=2.0.0
+torchvision>=0.15.0
+torchreid==0.2.5
+gdown>=4.5.1
+protobuf<4.21.3
