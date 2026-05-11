@@ -64,6 +64,15 @@ int32_t appliedPanStepsPerSec = INT32_MIN;
 int32_t appliedTiltStepsPerSec = INT32_MIN;
 uint16_t configuredMicrosteps = DEFAULT_MICROSTEPS;
 
+uint16_t normalizeDriverMicrosteps(const uint16_t microsteps) {
+  // TMCStepper 0.7.3 uses microsteps(0) to select full-step mode.
+  return microsteps == 1 ? 0 : microsteps;
+}
+
+uint16_t displayDriverMicrosteps(const uint16_t driverMicrosteps) {
+  return driverMicrosteps == 0 ? 1 : driverMicrosteps;
+}
+
 int32_t clampSpeed(const int32_t requestedStepsPerSec) {
   int32_t maxSpeed = DEFAULT_MAX_SPEED_STEPS_PER_SEC;
   portENTER_CRITICAL(&commandMux);
@@ -162,10 +171,15 @@ void setMicrosteps(const uint16_t microsteps) {
     tiltStepper->stopMove();
   }
 
-  panDriver.microsteps(microsteps);
-  tiltDriver.microsteps(microsteps);
+  const uint16_t driverMicrosteps = normalizeDriverMicrosteps(microsteps);
+  panDriver.mstep_reg_select(true);
+  tiltDriver.mstep_reg_select(true);
+  panDriver.microsteps(driverMicrosteps);
+  tiltDriver.microsteps(driverMicrosteps);
   configuredMicrosteps = microsteps;
-  Serial.printf("OK M:%u\r\n", microsteps);
+  Serial.printf("OK M:%u PM:%u TM:%u\r\n", microsteps,
+                displayDriverMicrosteps(panDriver.microsteps()),
+                displayDriverMicrosteps(tiltDriver.microsteps()));
 }
 
 bool parseSingleIntCommand(const char *payload, int32_t *value) {
@@ -232,6 +246,34 @@ bool handleConfigLine(char *line) {
   return false;
 }
 
+void printStatus() {
+  int32_t maxSpeed = DEFAULT_MAX_SPEED_STEPS_PER_SEC;
+  int32_t panTarget = 0;
+  int32_t tiltTarget = 0;
+
+  portENTER_CRITICAL(&commandMux);
+  maxSpeed = configuredMaxSpeedStepsPerSec;
+  panTarget = targetPanStepsPerSec;
+  tiltTarget = targetTiltStepsPerSec;
+  portEXIT_CRITICAL(&commandMux);
+
+  Serial.printf(
+      "STAT M:%u PM:%u TM:%u S:%ld PV:0x%02X TV:0x%02X V:%ld,%ld\r\n",
+      configuredMicrosteps, displayDriverMicrosteps(panDriver.microsteps()),
+      displayDriverMicrosteps(tiltDriver.microsteps()),
+      static_cast<long>(maxSpeed), panDriver.version(), tiltDriver.version(),
+      static_cast<long>(panTarget), static_cast<long>(tiltTarget));
+}
+
+bool handleStatusLine(const char *line) {
+  if (line == nullptr || strcmp(line, "?") != 0) {
+    return false;
+  }
+
+  printStatus();
+  return true;
+}
+
 void publishCommand(const VelocityCommand &command) {
   portENTER_CRITICAL(&commandMux);
   targetPanStepsPerSec = command.panStepsPerSec;
@@ -269,7 +311,7 @@ void configureTmc2209(TMC2209Stepper &driver, const char *axisName) {
   driver.toff(4);
   driver.blank_time(24);
   driver.rms_current(RMS_CURRENT_MA);
-  driver.microsteps(configuredMicrosteps);
+  driver.microsteps(normalizeDriverMicrosteps(configuredMicrosteps));
 
   driver.en_spreadCycle(false);  // false enables StealthChop on TMC2209.
   driver.pwm_autoscale(true);
@@ -362,6 +404,8 @@ void serialCommandTask(void *parameter) {
           VelocityCommand command{};
           if (parseVelocityLine(line, &command)) {
             publishCommand(command);
+          } else if (handleStatusLine(line)) {
+            // Status requests are intentionally not fail-safe heartbeats.
           } else {
             handleConfigLine(line);
           }

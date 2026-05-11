@@ -7,6 +7,7 @@ Controls:
   Space: emergency stop while held/pressed
   +/-: adjust max speed
   [ / ]: adjust TMC2209 microsteps
+  R: request ESP32/TMC status
   Q or Esc: quit
 """
 
@@ -34,7 +35,7 @@ DEFAULT_MICROSTEPS = 16
 MICROSTEP_OPTIONS = (1, 2, 4, 8, 16, 32, 64, 128, 256)
 MIN_MAX_SPEED = 100
 HARD_MAX_SPEED = 80000
-WINDOW_SIZE = (620, 300)
+WINDOW_SIZE = (820, 380)
 
 
 @dataclass
@@ -43,6 +44,8 @@ class CommandState:
     tilt: float = 0.0
     max_speed: int = DEFAULT_MAX_SPEED
     microsteps: int = DEFAULT_MICROSTEPS
+    pan_scale: float = 1.0
+    tilt_scale: float = 1.0
 
 
 class GimbalSerial:
@@ -55,6 +58,7 @@ class GimbalSerial:
     ) -> None:
         self.dry_run = dry_run
         self.serial = None
+        self.rx_buffer = ""
         if not dry_run:
             load_serial()
             if not port:
@@ -70,6 +74,27 @@ class GimbalSerial:
 
     def send_microsteps(self, microsteps: int) -> None:
         self._write_line(f"M:{microsteps}")
+
+    def request_status(self) -> None:
+        self._write_line("?")
+
+    def read_available_lines(self) -> list[str]:
+        if self.dry_run or self.serial is None:
+            return []
+
+        waiting = self.serial.in_waiting
+        if waiting <= 0:
+            return []
+
+        chunk = self.serial.read(waiting).decode("utf-8", errors="replace")
+        self.rx_buffer += chunk
+        lines: list[str] = []
+        while "\n" in self.rx_buffer:
+            line, self.rx_buffer = self.rx_buffer.split("\n", 1)
+            line = line.strip()
+            if line:
+                lines.append(line)
+        return lines
 
     def _write_line(self, line: str) -> None:
         message = f"{line}\n"
@@ -178,6 +203,12 @@ def read_keyboard_target(max_speed: int) -> tuple[float, float]:
     return pan_axis * max_speed, tilt_axis * max_speed
 
 
+def apply_axis_scale(target: tuple[float, float], state: CommandState) -> tuple[float, float]:
+    pan = clamp(target[0] * state.pan_scale, state.max_speed)
+    tilt = clamp(target[1] * state.tilt_scale, state.max_speed)
+    return pan, tilt
+
+
 def read_joystick_target(
     joystick: Optional[pygame.joystick.Joystick],
     max_speed: int,
@@ -213,6 +244,7 @@ def draw_status(
     joystick_name: str,
     dry_run: bool,
     port: Optional[str],
+    last_messages: list[str],
 ) -> None:
     screen.fill((24, 27, 31))
 
@@ -224,7 +256,8 @@ def draw_status(
         f"Tilt: {int(round(state.tilt)):>5} step/s",
         f"Max speed: {state.max_speed} step/s",
         f"Microsteps: {state.microsteps}x",
-        "Arrows/WASD/left stick move | Space stop | +/- speed | [/] microsteps | Q/Esc quit",
+        f"Axis scale: pan {state.pan_scale:.2f}x / tilt {state.tilt_scale:.2f}x",
+        "Arrows/WASD/left stick move | Space stop | +/- speed | [/] microsteps | R status | Q/Esc quit",
     ]
 
     y = 24
@@ -233,6 +266,12 @@ def draw_status(
         surface = font.render(line, True, color)
         screen.blit(surface, (28, y))
         y += 34 if index == 0 else 30
+
+    y += 6
+    for message in last_messages[-4:]:
+        surface = font.render(message[-92:], True, (132, 207, 185))
+        screen.blit(surface, (28, y))
+        y += 24
 
     pygame.display.flip()
 
@@ -247,6 +286,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--list-ports", action="store_true", help="List serial ports and exit.")
     parser.add_argument("--max-speed", type=int, default=DEFAULT_MAX_SPEED, help="Initial max speed in step/s.")
     parser.add_argument("--microsteps", type=int, default=DEFAULT_MICROSTEPS, help="Initial TMC2209 microsteps.")
+    parser.add_argument("--pan-scale", type=float, default=1.0, help="Host-side pan velocity multiplier.")
+    parser.add_argument("--tilt-scale", type=float, default=1.0, help="Host-side tilt velocity multiplier.")
     parser.add_argument("--send-hz", type=float, default=DEFAULT_SEND_HZ, help="Command send rate.")
     parser.add_argument("--key-ramp", type=float, default=DEFAULT_KEY_RAMP, help="Keyboard ramp in step/s^2.")
     parser.add_argument("--deadzone", type=float, default=DEFAULT_JOYSTICK_DEADZONE)
@@ -286,13 +327,17 @@ def main() -> int:
     state = CommandState(
         max_speed=clamp_max_speed(args.max_speed),
         microsteps=normalize_microsteps(args.microsteps),
+        pan_scale=max(0.05, args.pan_scale),
+        tilt_scale=max(0.05, args.tilt_scale),
     )
     gimbal = GimbalSerial(args.port, args.baud, timeout=0.05, dry_run=args.dry_run)
     gimbal.send_max_speed(state.max_speed)
     gimbal.send_microsteps(state.microsteps)
+    gimbal.request_status()
     send_interval_s = 1.0 / args.send_hz
     last_send = 0.0
     last_frame = time.monotonic()
+    last_messages: list[str] = []
 
     try:
         running = True
@@ -313,21 +358,27 @@ def main() -> int:
                     elif event.key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
                         state.max_speed = clamp_max_speed(state.max_speed + 500)
                         gimbal.send_max_speed(state.max_speed)
+                        gimbal.request_status()
                     elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
                         state.max_speed = clamp_max_speed(state.max_speed - 500)
                         gimbal.send_max_speed(state.max_speed)
+                        gimbal.request_status()
                     elif event.key == pygame.K_LEFTBRACKET:
                         state.microsteps = cycle_microsteps(state.microsteps, -1)
                         state.pan = 0.0
                         state.tilt = 0.0
                         gimbal.send_velocity(0, 0)
                         gimbal.send_microsteps(state.microsteps)
+                        gimbal.request_status()
                     elif event.key == pygame.K_RIGHTBRACKET:
                         state.microsteps = cycle_microsteps(state.microsteps, 1)
                         state.pan = 0.0
                         state.tilt = 0.0
                         gimbal.send_velocity(0, 0)
                         gimbal.send_microsteps(state.microsteps)
+                        gimbal.request_status()
+                    elif event.key == pygame.K_r:
+                        gimbal.request_status()
                 elif event.type == pygame.JOYDEVICEADDED and joystick is None:
                     joystick = pygame.joystick.Joystick(event.device_index)
                     joystick.init()
@@ -350,6 +401,7 @@ def main() -> int:
                         invert_tilt=not args.no_invert_tilt,
                     ),
                 )
+                target_pan, target_tilt = apply_axis_scale((target_pan, target_tilt), state)
 
             max_delta = args.key_ramp * dt
             state.pan = clamp(ramp_toward(state.pan, target_pan, max_delta), state.max_speed)
@@ -359,7 +411,10 @@ def main() -> int:
                 gimbal.send_velocity(int(round(state.pan)), int(round(state.tilt)))
                 last_send = now
 
-            draw_status(screen, font, state, joystick_name, args.dry_run, args.port)
+            last_messages.extend(gimbal.read_available_lines())
+            del last_messages[:-8]
+
+            draw_status(screen, font, state, joystick_name, args.dry_run, args.port, last_messages)
             clock.tick(60)
     finally:
         gimbal.close()

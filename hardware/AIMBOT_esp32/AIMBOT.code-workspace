@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "../.."
+		},
+		{
+			"name": "AIMBOT_esp32",
+			"path": "."
+		}
+	],
+	"settings": {}
+}
