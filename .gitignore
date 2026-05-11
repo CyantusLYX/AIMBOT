@@ -46,3 +46,19 @@ build/
 dist/
 *.spec
  *.zip
+ models/*
+
+# 2. Android Studio & Gradle
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# 忽略所有模組底下的 build 資料夾 (重要！)
+src_android/app/build/
+src_android/build/
