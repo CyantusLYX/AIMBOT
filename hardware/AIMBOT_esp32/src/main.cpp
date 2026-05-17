@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <BluetoothSerial.h>
 #include <FastAccelStepper.h>
 #include <TMCStepper.h>
 
@@ -10,6 +11,9 @@ constexpr uint8_t TILT_STEP_PIN = 27;
 constexpr uint8_t PAN_DIR_PIN = 14;
 constexpr uint8_t PAN_STEP_PIN = 12;
 constexpr uint8_t ENABLE_PIN = 13;  // TMC2209 EN/ENN is active low.
+// GPIO36 is input-only and has no internal pull-up on ESP32. Add an external
+// pull-up; driving this pin low disables both motor drivers.
+constexpr uint8_t MOTOR_DISABLE_INPUT_PIN = 36;
 
 constexpr uint8_t TMC_UART_RX_PIN = 16;
 constexpr uint8_t TMC_UART_TX_PIN = 17;
@@ -21,8 +25,10 @@ constexpr float R_SENSE_OHMS = 0.11f;
 
 constexpr uint32_t SERIAL_BAUD = 115200;
 constexpr uint32_t TMC_UART_BAUD = 115200;
+constexpr char BLUETOOTH_DEVICE_NAME[] = "AIMBOT-Gimbal";
 constexpr uint16_t DEFAULT_MICROSTEPS = 16;
 constexpr uint16_t RMS_CURRENT_MA = 800;
+constexpr float HOLD_CURRENT_MULTIPLIER = 0.8f;
 
 // ------------------------------ Motion policy ------------------------------
 constexpr int32_t DEFAULT_MAX_SPEED_STEPS_PER_SEC = 20000;
@@ -38,7 +44,6 @@ constexpr bool TILT_DIR_HIGH_COUNTS_UP = true;
 constexpr uint32_t MOTION_LOOP_PERIOD_MS = 2;
 constexpr uint32_t SERIAL_TASK_PERIOD_MS = 1;
 constexpr uint16_t DRIVER_ENABLE_DELAY_US = 1000;
-constexpr uint16_t DRIVER_DISABLE_DELAY_MS = 250;
 constexpr uint16_t DIR_CHANGE_DELAY_US = 200;
 constexpr size_t SERIAL_LINE_BUFFER_SIZE = 64;
 
@@ -47,6 +52,16 @@ struct VelocityCommand {
   int32_t tiltStepsPerSec;
 };
 
+struct CommandSource {
+  Stream *input;
+  Print *output;
+  const char *name;
+  char line[SERIAL_LINE_BUFFER_SIZE];
+  size_t index;
+  bool discardingOverflow;
+};
+
+BluetoothSerial SerialBT;
 FastAccelStepperEngine stepperEngine;
 FastAccelStepper *panStepper = nullptr;
 FastAccelStepper *tiltStepper = nullptr;
@@ -59,6 +74,8 @@ volatile int32_t targetPanStepsPerSec = 0;
 volatile int32_t targetTiltStepsPerSec = 0;
 volatile uint32_t lastValidCommandMs = 0;
 volatile int32_t configuredMaxSpeedStepsPerSec = DEFAULT_MAX_SPEED_STEPS_PER_SEC;
+volatile bool motorsEnabledRequested = true;
+volatile bool driversCurrentlyEnabled = false;
 
 int32_t appliedPanStepsPerSec = INT32_MIN;
 int32_t appliedTiltStepsPerSec = INT32_MIN;
@@ -96,6 +113,23 @@ int32_t clampToLimit(const int32_t value, const int32_t limit) {
     return -limit;
   }
   return value;
+}
+
+void setDriversEnabled(const bool enabled) {
+  digitalWrite(ENABLE_PIN, enabled ? LOW : HIGH);
+}
+
+bool hardwareMotorDisableActive() {
+  return digitalRead(MOTOR_DISABLE_INPUT_PIN) == LOW;
+}
+
+bool shouldDriversBeEnabled() {
+  bool requested = false;
+  portENTER_CRITICAL(&commandMux);
+  requested = motorsEnabledRequested;
+  portEXIT_CRITICAL(&commandMux);
+
+  return requested && !hardwareMotorDisableActive();
 }
 
 bool parseInt32Strict(const char *begin, const char *end, int32_t *value) {
@@ -141,7 +175,63 @@ void forceStopTargets() {
   portEXIT_CRITICAL(&commandMux);
 }
 
-void setMaxSpeedLimit(const int32_t requestedMaxSpeed) {
+void stopStepperOutputs() {
+  if (panStepper != nullptr) {
+    panStepper->stopMove();
+  }
+  if (tiltStepper != nullptr) {
+    tiltStepper->stopMove();
+  }
+  appliedPanStepsPerSec = 0;
+  appliedTiltStepsPerSec = 0;
+}
+
+void applyMotorEnablePolicy() {
+  const bool shouldEnable = shouldDriversBeEnabled();
+
+  if (!shouldEnable) {
+    forceStopTargets();
+    stopStepperOutputs();
+  }
+
+  if (shouldEnable == driversCurrentlyEnabled) {
+    return;
+  }
+
+  setDriversEnabled(shouldEnable);
+  driversCurrentlyEnabled = shouldEnable;
+
+  if (shouldEnable) {
+    delayMicroseconds(DRIVER_ENABLE_DELAY_US);
+  }
+}
+
+void printMotorEnableStatus(Print &out, const char *prefix) {
+  bool requested = false;
+  portENTER_CRITICAL(&commandMux);
+  requested = motorsEnabledRequested;
+  portEXIT_CRITICAL(&commandMux);
+
+  out.printf("%s E:%u ER:%u K:%u\r\n", prefix,
+             driversCurrentlyEnabled ? 1 : 0, requested ? 1 : 0,
+             hardwareMotorDisableActive() ? 1 : 0);
+}
+
+void setMotorEnableRequest(const bool enabled, Print &out) {
+  portENTER_CRITICAL(&commandMux);
+  motorsEnabledRequested = enabled;
+  if (!enabled) {
+    targetPanStepsPerSec = 0;
+    targetTiltStepsPerSec = 0;
+  }
+  lastValidCommandMs = millis();
+  portEXIT_CRITICAL(&commandMux);
+
+  applyMotorEnablePolicy();
+  printMotorEnableStatus(out, "OK");
+}
+
+void setMaxSpeedLimit(const int32_t requestedMaxSpeed, Print &out) {
   const int32_t maxSpeed =
       constrain(requestedMaxSpeed, MIN_MAX_SPEED_STEPS_PER_SEC,
                 HARD_MAX_SPEED_STEPS_PER_SEC);
@@ -152,12 +242,14 @@ void setMaxSpeedLimit(const int32_t requestedMaxSpeed) {
   targetTiltStepsPerSec = clampToLimit(targetTiltStepsPerSec, maxSpeed);
   portEXIT_CRITICAL(&commandMux);
 
-  Serial.printf("OK S:%ld\r\n", static_cast<long>(maxSpeed));
+  out.printf("OK S:%ld\r\n", static_cast<long>(maxSpeed));
 }
 
-void setMicrosteps(const uint16_t microsteps) {
+void setMicrosteps(const uint16_t microsteps, Print &out) {
   if (microsteps == configuredMicrosteps) {
-    Serial.printf("OK M:%u\r\n", microsteps);
+    out.printf("OK M:%u PM:%u TM:%u\r\n", microsteps,
+               displayDriverMicrosteps(panDriver.microsteps()),
+               displayDriverMicrosteps(tiltDriver.microsteps()));
     return;
   }
 
@@ -177,9 +269,9 @@ void setMicrosteps(const uint16_t microsteps) {
   panDriver.microsteps(driverMicrosteps);
   tiltDriver.microsteps(driverMicrosteps);
   configuredMicrosteps = microsteps;
-  Serial.printf("OK M:%u PM:%u TM:%u\r\n", microsteps,
-                displayDriverMicrosteps(panDriver.microsteps()),
-                displayDriverMicrosteps(tiltDriver.microsteps()));
+  out.printf("OK M:%u PM:%u TM:%u\r\n", microsteps,
+             displayDriverMicrosteps(panDriver.microsteps()),
+             displayDriverMicrosteps(tiltDriver.microsteps()));
 }
 
 bool parseSingleIntCommand(const char *payload, int32_t *value) {
@@ -219,7 +311,7 @@ bool parseVelocityLine(char *line, VelocityCommand *command) {
   return true;
 }
 
-bool handleConfigLine(char *line) {
+bool handleConfigLine(char *line, Print &out) {
   if (line == nullptr || line[1] != ':') {
     return false;
   }
@@ -231,46 +323,59 @@ bool handleConfigLine(char *line) {
 
   if (line[0] == 'M') {
     if (!isValidMicrosteps(value)) {
-      Serial.printf("ERR M:%ld\r\n", static_cast<long>(value));
+      out.printf("ERR M:%ld\r\n", static_cast<long>(value));
       return false;
     }
-    setMicrosteps(static_cast<uint16_t>(value));
+    setMicrosteps(static_cast<uint16_t>(value), out);
     return true;
   }
 
   if (line[0] == 'S') {
-    setMaxSpeedLimit(value);
+    setMaxSpeedLimit(value, out);
+    return true;
+  }
+
+  if (line[0] == 'E') {
+    if (value != 0 && value != 1) {
+      out.printf("ERR E:%ld\r\n", static_cast<long>(value));
+      return false;
+    }
+    setMotorEnableRequest(value == 1, out);
     return true;
   }
 
   return false;
 }
 
-void printStatus() {
+void printStatus(Print &out) {
   int32_t maxSpeed = DEFAULT_MAX_SPEED_STEPS_PER_SEC;
   int32_t panTarget = 0;
   int32_t tiltTarget = 0;
+  bool enableRequested = false;
 
   portENTER_CRITICAL(&commandMux);
   maxSpeed = configuredMaxSpeedStepsPerSec;
   panTarget = targetPanStepsPerSec;
   tiltTarget = targetTiltStepsPerSec;
+  enableRequested = motorsEnabledRequested;
   portEXIT_CRITICAL(&commandMux);
 
-  Serial.printf(
-      "STAT M:%u PM:%u TM:%u S:%ld PV:0x%02X TV:0x%02X V:%ld,%ld\r\n",
+  out.printf(
+      "STAT M:%u PM:%u TM:%u S:%ld PV:0x%02X TV:0x%02X V:%ld,%ld E:%u ER:%u K:%u\r\n",
       configuredMicrosteps, displayDriverMicrosteps(panDriver.microsteps()),
       displayDriverMicrosteps(tiltDriver.microsteps()),
       static_cast<long>(maxSpeed), panDriver.version(), tiltDriver.version(),
-      static_cast<long>(panTarget), static_cast<long>(tiltTarget));
+      static_cast<long>(panTarget), static_cast<long>(tiltTarget),
+      driversCurrentlyEnabled ? 1 : 0, enableRequested ? 1 : 0,
+      hardwareMotorDisableActive() ? 1 : 0);
 }
 
-bool handleStatusLine(const char *line) {
+bool handleStatusLine(const char *line, Print &out) {
   if (line == nullptr || strcmp(line, "?") != 0) {
     return false;
   }
 
-  printStatus();
+  printStatus(out);
   return true;
 }
 
@@ -310,7 +415,7 @@ void configureTmc2209(TMC2209Stepper &driver, const char *axisName) {
 
   driver.toff(4);
   driver.blank_time(24);
-  driver.rms_current(RMS_CURRENT_MA);
+  driver.rms_current(RMS_CURRENT_MA, HOLD_CURRENT_MULTIPLIER);
   driver.microsteps(normalizeDriverMicrosteps(configuredMicrosteps));
 
   driver.en_spreadCycle(false);  // false enables StealthChop on TMC2209.
@@ -333,10 +438,8 @@ bool configureStepper(FastAccelStepper *stepper, const char *axisName,
   }
 
   stepper->setDirectionPin(dirPin, dirHighCountsUp, DIR_CHANGE_DELAY_US);
-  stepper->setEnablePin(ENABLE_PIN, true);
-  stepper->setAutoEnable(true);
-  stepper->setDelayToEnable(DRIVER_ENABLE_DELAY_US);
-  stepper->setDelayToDisable(DRIVER_DISABLE_DELAY_MS);
+  // EN/ENN is shared by both axes and is managed globally. Auto-disable would
+  // release tilt holding torque when V:0,0 is used for tracking deadband/idle.
   stepper->setSpeedInHz(1);
   stepper->setAcceleration(ACCELERATION_STEPS_PER_SEC2);
   stepper->stopMove();
@@ -376,56 +479,71 @@ void applyAxisSpeed(FastAccelStepper *stepper, int32_t *lastApplied,
 }
 
 void applyVelocityTargets(const VelocityCommand &command) {
+  if (!driversCurrentlyEnabled) {
+    stopStepperOutputs();
+    return;
+  }
+
   applyAxisSpeed(panStepper, &appliedPanStepsPerSec,
                  command.panStepsPerSec);
   applyAxisSpeed(tiltStepper, &appliedTiltStepsPerSec,
                  command.tiltStepsPerSec);
 }
 
-void serialCommandTask(void *parameter) {
+void processCommandLine(char *line, Print &out) {
+  VelocityCommand command{};
+  if (parseVelocityLine(line, &command)) {
+    publishCommand(command);
+  } else if (handleStatusLine(line, out)) {
+    // Status requests are intentionally not fail-safe heartbeats.
+  } else {
+    handleConfigLine(line, out);
+  }
+}
+
+void pollCommandSource(CommandSource &source) {
+  while (source.input->available() > 0) {
+    const char incoming = static_cast<char>(source.input->read());
+
+    if (incoming == '\r') {
+      continue;
+    }
+
+    if (incoming == '\n') {
+      if (!source.discardingOverflow && source.index > 0) {
+        source.line[source.index] = '\0';
+        processCommandLine(source.line, *source.output);
+      }
+
+      source.index = 0;
+      source.discardingOverflow = false;
+      continue;
+    }
+
+    if (source.discardingOverflow) {
+      continue;
+    }
+
+    if (source.index < (SERIAL_LINE_BUFFER_SIZE - 1)) {
+      source.line[source.index++] = incoming;
+    } else {
+      source.index = 0;
+      source.discardingOverflow = true;
+      source.output->printf("ERR %s line-too-long\r\n", source.name);
+    }
+  }
+}
+
+void commandTask(void *parameter) {
   (void)parameter;
 
-  char line[SERIAL_LINE_BUFFER_SIZE] = {};
-  size_t index = 0;
-  bool discardingOverflow = false;
+  CommandSource usbSource{&Serial, &Serial, "USB", {}, 0, false};
+  CommandSource bluetoothSource{&SerialBT, &SerialBT, "BT", {}, 0, false};
 
   for (;;) {
-    while (Serial.available() > 0) {
-      const char incoming = static_cast<char>(Serial.read());
-
-      if (incoming == '\r') {
-        continue;
-      }
-
-      if (incoming == '\n') {
-        if (!discardingOverflow && index > 0) {
-          line[index] = '\0';
-
-          VelocityCommand command{};
-          if (parseVelocityLine(line, &command)) {
-            publishCommand(command);
-          } else if (handleStatusLine(line)) {
-            // Status requests are intentionally not fail-safe heartbeats.
-          } else {
-            handleConfigLine(line);
-          }
-        }
-
-        index = 0;
-        discardingOverflow = false;
-        continue;
-      }
-
-      if (discardingOverflow) {
-        continue;
-      }
-
-      if (index < (SERIAL_LINE_BUFFER_SIZE - 1)) {
-        line[index++] = incoming;
-      } else {
-        index = 0;
-        discardingOverflow = true;
-      }
+    pollCommandSource(usbSource);
+    if (SerialBT.hasClient()) {
+      pollCommandSource(bluetoothSource);
     }
 
     vTaskDelay(pdMS_TO_TICKS(SERIAL_TASK_PERIOD_MS));
@@ -437,11 +555,15 @@ void serialCommandTask(void *parameter) {
 void setup() {
   Serial.begin(SERIAL_BAUD);
   Serial1.begin(TMC_UART_BAUD, SERIAL_8N1, TMC_UART_RX_PIN, TMC_UART_TX_PIN);
+  SerialBT.begin(BLUETOOTH_DEVICE_NAME);
 
   pinMode(ENABLE_PIN, OUTPUT);
-  digitalWrite(ENABLE_PIN, HIGH);
+  pinMode(MOTOR_DISABLE_INPUT_PIN, INPUT);
+  setDriversEnabled(false);
+  driversCurrentlyEnabled = false;
 
   Serial.println("AIMBOT ESP32 pan/tilt motor controller booting");
+  Serial.printf("Bluetooth SPP device: %s\r\n", BLUETOOTH_DEVICE_NAME);
 
   configureTmc2209(panDriver, "Pan");
   configureTmc2209(tiltDriver, "Tilt");
@@ -456,18 +578,21 @@ void setup() {
   const bool tiltReady = configureStepper(
       tiltStepper, "Tilt", TILT_DIR_PIN, TILT_DIR_HIGH_COUNTS_UP);
 
+  applyMotorEnablePolicy();
+
   portENTER_CRITICAL(&commandMux);
   lastValidCommandMs = millis();
   portEXIT_CRITICAL(&commandMux);
 
-  xTaskCreatePinnedToCore(serialCommandTask, "SerialCommandTask", 4096, nullptr,
-                          2, nullptr, 0);
+  xTaskCreatePinnedToCore(commandTask, "CommandTask", 4096, nullptr, 2, nullptr,
+                          0);
 
   Serial.printf("Stepper init: pan=%s tilt=%s\r\n", panReady ? "ok" : "fail",
                 tiltReady ? "ok" : "fail");
 }
 
 void loop() {
+  applyMotorEnablePolicy();
   applyVelocityTargets(snapshotCommand());
   vTaskDelay(pdMS_TO_TICKS(MOTION_LOOP_PERIOD_MS));
 }

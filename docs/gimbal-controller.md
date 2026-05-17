@@ -11,6 +11,9 @@ control tool used to bring up and test the pan/tilt motors.
   - Pan: STEP `GPIO12`, DIR `GPIO14`, TMC2209 address `0`.
   - Tilt: STEP `GPIO27`, DIR `GPIO26`, TMC2209 address `1`.
 - Shared enable: `GPIO13`, active low.
+- Motor disable input: `GPIO36`, active low. GPIO36 is input-only and has no
+  internal pull-up, so add an external pull-up and pull it to GND to disable
+  both drivers.
 - TMC2209 UART: `Serial1` remapped to RX `GPIO16`, TX `GPIO17`.
 
 GPIO12 is an ESP32 strapping pin. Keep external circuitry from pulling it to an
@@ -24,9 +27,11 @@ baud. Values are signed STEP pulse rates after the active microstep setting.
 | Command | Meaning |
 | --- | --- |
 | `V:<pan>,<tilt>` | Set pan and tilt target velocity in step/s. |
+| `E:1` | Request motor driver enable. Ignored by the hardware interlock while GPIO36 is low. |
+| `E:0` | Disable both motor drivers and clear pan/tilt velocity targets. |
 | `S:<max_step_hz>` | Set the runtime speed clamp. Firmware clamps this to `100..80000`. |
 | `M:<microsteps>` | Set both TMC2209 drivers to the requested microstep value. |
-| `?` | Print firmware/TMC status, including configured and driver-read microsteps. |
+| `?` | Print firmware/TMC status, including microsteps, velocity targets, and motor enable state. |
 
 Valid microstep values are `1`, `2`, `4`, `8`, `16`, `32`, `64`, `128`, and
 `256`.
@@ -36,13 +41,35 @@ Example:
 ```text
 S:4000
 M:16
+E:1
 V:1000,-500
 V:0,0
+E:0
 ?
 ```
 
 If no valid velocity command is received for more than `500 ms`, the firmware
 sets both target speeds to zero. Invalid commands do not refresh the fail-safe.
+Zero speed means "stop stepping", not "release the motors": the shared TMC2209
+enable line is kept active after initialization so the tilt axis keeps holding
+torque while the Android tracker is engaged, in deadband, or temporarily missing
+its locked target.
+
+`E:0` is different from `V:0,0`: it disables the shared TMC2209 EN line and lets
+the motors relax. `E:1` re-enables the drivers only when GPIO36 is high. GPIO36
+is a hardware override, so pulling it low clears the current velocity targets,
+stops both steppers, and disables both drivers even if the Android app has sent
+`E:1`.
+
+Status responses include motor enable fields:
+
+```text
+STAT ... V:<pan>,<tilt> E:<actual> ER:<requested> K:<kill>
+```
+
+- `E` is the actual driver enable state after the GPIO36 interlock.
+- `ER` is the last requested enable state from `E:1` / `E:0`.
+- `K` is `1` when GPIO36 is low and actively forcing the drivers off.
 
 Changing microsteps stops both axes before writing the TMC2209 registers. This
 keeps the host velocity unit from changing while the motors are still moving.
@@ -127,9 +154,13 @@ Choose the PyTorch wheel index that matches the target machine's CUDA runtime.
 
 - Send `V:0,0` before changing wiring, resetting the ESP32, or touching the
   mechanism.
+- Use `E:0` when the app or host should intentionally release the motors.
+- Wire GPIO36 with an external pull-up and a low-side button/safety circuit for
+  active-low motor disable. Do not rely on an ESP32 internal pull-up here.
 - Add a pull-up on the shared enable line so the TMC2209 drivers stay disabled
   while the ESP32 resets.
-- If the gimbal relies on motor holding torque to support weight, reset or power
-  loss can let the mechanism move freely.
+- During normal firmware operation, idle `V:0,0` keeps the drivers enabled for
+  holding torque. Reset, bootloader mode, firmware crash, or power loss can
+  still let the mechanism move freely.
 - Start with low `--max-speed` values during bring-up, then increase only after
   verifying direction and travel limits.
