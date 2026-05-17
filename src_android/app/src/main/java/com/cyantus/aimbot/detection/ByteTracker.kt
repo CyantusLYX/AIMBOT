@@ -12,10 +12,12 @@ data class RawDetection(
 class ByteTracker {
     init {
         ByteTrackNativeLibrary.ensureLoaded()
+        nativeReset()
     }
 
     fun track(detections: List<RawDetection>): List<DetectionResult> {
         if (detections.isEmpty()) {
+            nativeUpdate(FloatArray(0))
             return emptyList()
         }
 
@@ -41,6 +43,7 @@ class ByteTracker {
     }
 
     private external fun nativeUpdate(rawDetections: FloatArray): FloatArray
+    private external fun nativeReset()
 }
 
 internal object ByteTrackerArrayCodec {

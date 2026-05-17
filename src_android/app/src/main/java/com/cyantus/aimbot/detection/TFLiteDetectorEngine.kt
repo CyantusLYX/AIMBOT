@@ -2,6 +2,8 @@ package com.cyantus.aimbot.detection
 
 import android.content.Context
 import android.content.res.AssetManager
+import android.graphics.ImageFormat
+import android.graphics.PixelFormat
 import android.graphics.RectF
 import android.os.SystemClock
 import android.util.Log
@@ -49,8 +51,9 @@ class TFLiteDetectorEngine(
     private var closed = false
     private var analyzedFrameCount = 0
     private var lastMaxConfidence = 0f
-    private var lastInferenceCompletedAtMs = 0L
+    private var lastInferenceStartedAtMs = 0L
     private var lastTrackedDetections: List<DetectionResult> = emptyList()
+    private var loggedInputFrameFormat = false
 
     init {
         require(modelAssetPath.isNotBlank()) {
@@ -86,23 +89,23 @@ class TFLiteDetectorEngine(
         }
 
         val nowMs = SystemClock.elapsedRealtime()
-        if (lastInferenceCompletedAtMs > 0L &&
-            nowMs - lastInferenceCompletedAtMs < minInferenceIntervalMs
+        if (lastInferenceStartedAtMs > 0L &&
+            nowMs - lastInferenceStartedAtMs < minInferenceIntervalMs
         ) {
             imageProxy.close()
             onResult(lastTrackedDetections)
             return
         }
 
-        var ranRealInference = false
         var resultToEmit: List<DetectionResult> = emptyList()
         try {
-            ranRealInference = true
-            val startedAtMs = SystemClock.elapsedRealtime()
+            lastInferenceStartedAtMs = nowMs
+            val startedAtMs = nowMs
             val runtime = runtime ?: createRuntime().also { createdRuntime ->
                 runtime = createdRuntime
             }
             val runtimeReadyAtMs = SystemClock.elapsedRealtime()
+            logInputFrameFormatOnce(imageProxy)
             val preprocessedFrame = runtime.preprocessor.preprocess(imageProxy)
             val preprocessedAtMs = SystemClock.elapsedRealtime()
             val outputBuffers = runInference(runtime, preprocessedFrame.inputBuffer)
@@ -133,9 +136,6 @@ class TFLiteDetectorEngine(
         } catch (exception: RuntimeException) {
             Log.e(TAG, "TFLite analysis failed.", exception)
         } finally {
-            if (ranRealInference) {
-                lastInferenceCompletedAtMs = SystemClock.elapsedRealtime()
-            }
             imageProxy.close()
         }
         onResult(resultToEmit)
@@ -148,22 +148,8 @@ class TFLiteDetectorEngine(
     }
 
     private fun createRuntime(): DetectorRuntime {
-        val gpuDelegate = GpuDelegateFactory.createIfSupported(acceleration)
-        val interpreterOptions = Interpreter.Options().apply {
-            when (acceleration) {
-                Acceleration.CPU -> setNumThreads(CPU_THREAD_COUNT)
-                Acceleration.NNAPI -> setUseNNAPI(true)
-                Acceleration.GPU -> {
-                    if (gpuDelegate != null) {
-                        addDelegate(gpuDelegate)
-                    } else {
-                        setNumThreads(CPU_THREAD_COUNT)
-                    }
-                }
-            }
-        }
-        val interpreter = Interpreter(modelBuffer, interpreterOptions)
-        interpreter.allocateTensors()
+        val interpreterRuntime = createInterpreterRuntime()
+        val interpreter = interpreterRuntime.interpreter
 
         val inputTensor = interpreter.getInputTensor(0)
         val inputSize = resolveInputSize(inputTensor)
@@ -180,13 +166,105 @@ class TFLiteDetectorEngine(
         val outputTensor = interpreter.getOutputTensor(0)
         val outputConfig = resolveYoloV7OutputConfig(outputTensor)
 
+        Log.i(
+            TAG,
+            "YOLOv7 model tensors: input=${inputTensor.shape().contentToString()} " +
+                "output=${outputTensor.shape().contentToString()} classes=${outputConfig.numClasses}"
+        )
+
         return DetectorRuntime(
             interpreter = interpreter,
-            gpuDelegate = gpuDelegate,
+            gpuDelegate = interpreterRuntime.gpuDelegate,
             preprocessor = preprocessor,
             outputBuffers = outputBuffers,
             outputConfig = outputConfig,
             outputValues = FloatArray(outputTensor.numElements())
+        )
+    }
+
+    private fun createInterpreterRuntime(): InterpreterRuntime =
+        when (acceleration) {
+            Acceleration.CPU -> createCpuInterpreterRuntime()
+            Acceleration.NNAPI -> createNnApiInterpreterRuntime()
+            Acceleration.GPU -> createGpuInterpreterRuntime() ?: createCpuInterpreterRuntime(
+                fallbackReason = "GPU delegate unavailable; falling back to CPU."
+            )
+        }
+
+    private fun createGpuInterpreterRuntime(): InterpreterRuntime? {
+        val gpuDelegate = GpuDelegateFactory.createIfSupported(acceleration)
+            ?: return null
+        var interpreter: Interpreter? = null
+
+        return runCatching {
+            interpreter = Interpreter(
+                modelBuffer,
+                Interpreter.Options().apply {
+                    addDelegate(gpuDelegate)
+                }
+            )
+            requireNotNull(interpreter).apply {
+                allocateTensors()
+            }
+        }.fold(
+            onSuccess = { createdInterpreter ->
+                Log.i(TAG, "TFLite runtime initialized with GPU delegate.")
+                InterpreterRuntime(
+                    interpreter = createdInterpreter,
+                    gpuDelegate = gpuDelegate
+                )
+            },
+            onFailure = { exception ->
+                Log.w(TAG, "GPU delegate failed; falling back to CPU.", exception)
+                interpreter?.close()
+                gpuDelegate.close()
+                null
+            }
+        )
+    }
+
+    private fun createNnApiInterpreterRuntime(): InterpreterRuntime =
+        runCatching {
+            Interpreter(
+                modelBuffer,
+                Interpreter.Options().apply {
+                    setUseNNAPI(true)
+                }
+            ).apply {
+                allocateTensors()
+            }
+        }.fold(
+            onSuccess = { interpreter ->
+                Log.i(TAG, "TFLite runtime initialized with NNAPI.")
+                InterpreterRuntime(
+                    interpreter = interpreter,
+                    gpuDelegate = null
+                )
+            },
+            onFailure = { exception ->
+                Log.w(TAG, "NNAPI failed; falling back to CPU.", exception)
+                createCpuInterpreterRuntime()
+            }
+        )
+
+    private fun createCpuInterpreterRuntime(
+        fallbackReason: String? = null
+    ): InterpreterRuntime {
+        fallbackReason?.let { reason ->
+            Log.w(TAG, reason)
+        }
+        val interpreter = Interpreter(
+            modelBuffer,
+            Interpreter.Options().apply {
+                setNumThreads(CPU_THREAD_COUNT)
+            }
+        ).apply {
+            allocateTensors()
+        }
+        Log.i(TAG, "TFLite runtime initialized on CPU with $CPU_THREAD_COUNT threads.")
+        return InterpreterRuntime(
+            interpreter = interpreter,
+            gpuDelegate = null
         )
     }
 
@@ -301,6 +379,27 @@ class TFLiteDetectorEngine(
                 "inferenceMs=$inferenceMs postprocessMs=$postprocessMs"
         )
     }
+
+    private fun logInputFrameFormatOnce(imageProxy: ImageProxy) {
+        if (loggedInputFrameFormat) {
+            return
+        }
+
+        loggedInputFrameFormat = true
+        Log.i(
+            TAG,
+            "Analyzer frame: format=${imageProxy.formatName()} " +
+                "size=${imageProxy.width}x${imageProxy.height} " +
+                "rotation=${imageProxy.imageInfo.rotationDegrees}"
+        )
+    }
+
+    private fun ImageProxy.formatName(): String =
+        when (format) {
+            ImageFormat.YUV_420_888 -> "YUV_420_888"
+            PixelFormat.RGBA_8888 -> "RGBA_8888"
+            else -> format.toString()
+        }
 
     private val minInferenceIntervalMs: Long
         get() = MS_PER_SECOND / targetInferenceFps
@@ -421,6 +520,11 @@ class TFLiteDetectorEngine(
         }
     }
 
+    private data class InterpreterRuntime(
+        val interpreter: Interpreter,
+        val gpuDelegate: GpuDelegate?
+    )
+
     private object GpuDelegateFactory {
         fun createIfSupported(acceleration: Acceleration): GpuDelegate? {
             if (acceleration != Acceleration.GPU) {
@@ -490,10 +594,48 @@ private class YoloV7ImagePreprocessor(
 
         return PreprocessedFrame(
             inputBuffer = modelInputBuffer,
-            imageProcessor = imageProcessor,
-            imageWidth = imageProxy.width,
-            imageHeight = imageProxy.height
+            modelInputWidth = inputWidth,
+            modelInputHeight = inputHeight,
+            imageWidth = rotatedImageWidth(
+                imageWidth = imageProxy.width,
+                imageHeight = imageProxy.height,
+                rotationDegrees = imageProxy.imageInfo.rotationDegrees
+            ),
+            imageHeight = rotatedImageHeight(
+                imageWidth = imageProxy.width,
+                imageHeight = imageProxy.height,
+                rotationDegrees = imageProxy.imageInfo.rotationDegrees
+            )
         )
+    }
+
+    private fun rotatedImageWidth(
+        imageWidth: Int,
+        imageHeight: Int,
+        rotationDegrees: Int
+    ): Int =
+        if (isQuarterTurn(rotationDegrees)) {
+            imageHeight
+        } else {
+            imageWidth
+        }
+
+    private fun rotatedImageHeight(
+        imageWidth: Int,
+        imageHeight: Int,
+        rotationDegrees: Int
+    ): Int =
+        if (isQuarterTurn(rotationDegrees)) {
+            imageWidth
+        } else {
+            imageHeight
+        }
+
+    private fun isQuarterTurn(rotationDegrees: Int): Boolean {
+        val normalizedRotation = ((rotationDegrees % FULL_ROTATION_DEGREES) + FULL_ROTATION_DEGREES) %
+            FULL_ROTATION_DEGREES
+        return normalizedRotation == RIGHT_ANGLE_DEGREES ||
+            normalizedRotation == THREE_QUARTER_ROTATION_DEGREES
     }
 
     private fun processorFor(rotationDegrees: Int): ImageProcessor {
@@ -505,10 +647,10 @@ private class YoloV7ImagePreprocessor(
         }
 
         val clockwiseTurns = normalizedRotation / RIGHT_ANGLE_DEGREES
-        val counterClockwiseTurns = (FULL_TURN_COUNT - clockwiseTurns) % FULL_TURN_COUNT
+        val rot90Turns = (FULL_TURN_COUNT - clockwiseTurns) % FULL_TURN_COUNT
         val builder = ImageProcessor.Builder()
-        if (counterClockwiseTurns != 0) {
-            builder.add(Rot90Op(counterClockwiseTurns))
+        if (rot90Turns != 0) {
+            builder.add(Rot90Op(rot90Turns))
         }
         builder.add(
             ResizeOp(
@@ -557,6 +699,7 @@ private class YoloV7ImagePreprocessor(
         const val NORMALIZE_STD = 255f
         const val FULL_ROTATION_DEGREES = 360
         const val RIGHT_ANGLE_DEGREES = 90
+        const val THREE_QUARTER_ROTATION_DEGREES = 270
         const val FULL_TURN_COUNT = 4
         const val INT8_MIN = -128
         const val INT8_MAX = 127
@@ -567,13 +710,20 @@ private class YoloV7ImagePreprocessor(
 
 private data class PreprocessedFrame(
     val inputBuffer: ByteBuffer,
-    private val imageProcessor: ImageProcessor,
+    private val modelInputWidth: Int,
+    private val modelInputHeight: Int,
     private val imageWidth: Int,
     private val imageHeight: Int
 ) {
     fun mapModelRectToImage(modelRect: RectF): RectF {
-        val imageRect = imageProcessor.inverseTransform(modelRect, imageHeight, imageWidth)
-        imageRect.sort()
+        val scaleX = imageWidth.toFloat() / modelInputWidth.toFloat()
+        val scaleY = imageHeight.toFloat() / modelInputHeight.toFloat()
+        val imageRect = RectF(
+            modelRect.left * scaleX,
+            modelRect.top * scaleY,
+            modelRect.right * scaleX,
+            modelRect.bottom * scaleY
+        )
         imageRect.left = imageRect.left.coerceIn(0f, imageWidth.toFloat())
         imageRect.top = imageRect.top.coerceIn(0f, imageHeight.toFloat())
         imageRect.right = imageRect.right.coerceIn(0f, imageWidth.toFloat())

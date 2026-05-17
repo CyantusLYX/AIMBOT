@@ -40,10 +40,10 @@ class ImageProxyPreprocessor(
         }
 
         val clockwiseTurns = normalizedRotation / RIGHT_ANGLE_DEGREES
-        val counterClockwiseTurns = (FULL_TURN_COUNT - clockwiseTurns) % FULL_TURN_COUNT
+        val rot90Turns = (FULL_TURN_COUNT - clockwiseTurns) % FULL_TURN_COUNT
         val builder = ImageProcessor.Builder()
-        if (counterClockwiseTurns != 0) {
-            builder.add(Rot90Op(counterClockwiseTurns))
+        if (rot90Turns != 0) {
+            builder.add(Rot90Op(rot90Turns))
         }
         builder.add(
             ResizeOp(

@@ -5,6 +5,7 @@ import android.graphics.RectF
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Size
 import androidx.camera.core.ImageProxy
 import androidx.camera.view.PreviewView
 import androidx.camera.view.TransformExperimental
@@ -92,7 +93,13 @@ class GimbalViewModel(
 
     @androidx.annotation.OptIn(markerClass = [TransformExperimental::class])
     fun analyzeFrame(imageProxy: ImageProxy, previewView: PreviewView) {
-        val sourceTransform = createImageProxyTransform(imageProxy)
+        val activePipeline = detectorPipeline.value
+        val rotatedSourceSize = imageProxy.rotatedSourceSize()
+        val useRotationDegrees = activePipeline != DetectorPipeline.CUSTOM_TFLITE
+        val sourceTransform = createImageProxyTransform(
+            imageProxy = imageProxy,
+            useRotationDegrees = useRotationDegrees
+        )
         val activeDetectorGeneration: Long
         synchronized(detectorLock) {
             activeDetectorGeneration = detectorGeneration
@@ -103,7 +110,9 @@ class GimbalViewModel(
 
                 handleDetectorResults(
                     detectorGeneration = activeDetectorGeneration,
+                    pipeline = activePipeline,
                     previewView = previewView,
+                    rotatedSourceSize = rotatedSourceSize,
                     sourceTransform = sourceTransform,
                     imageSpaceResults = imageSpaceResults
                 )
@@ -114,7 +123,9 @@ class GimbalViewModel(
     @androidx.annotation.OptIn(markerClass = [TransformExperimental::class])
     private fun handleDetectorResults(
         detectorGeneration: Long,
+        pipeline: DetectorPipeline,
         previewView: PreviewView,
+        rotatedSourceSize: Size,
         sourceTransform: OutputTransform?,
         imageSpaceResults: List<DetectionResult>
     ) {
@@ -124,11 +135,19 @@ class GimbalViewModel(
             }
 
             val filteredImageSpaceResults = filterDetectionsForCurrentPipeline(imageSpaceResults)
-            val mappedResults = mapToPreviewCoordinates(
-                previewView = previewView,
-                sourceTransform = sourceTransform,
-                detections = filteredImageSpaceResults
-            )
+            val mappedResults = if (pipeline == DetectorPipeline.CUSTOM_TFLITE) {
+                mapRotatedImageToPreviewCoordinates(
+                    previewView = previewView,
+                    sourceSize = rotatedSourceSize,
+                    detections = filteredImageSpaceResults
+                )
+            } else {
+                mapToPreviewCoordinates(
+                    previewView = previewView,
+                    sourceTransform = sourceTransform,
+                    detections = filteredImageSpaceResults
+                )
+            }
 
             _detections.value = mappedResults
             maybeSendTrackingCommand(
@@ -330,13 +349,67 @@ class GimbalViewModel(
     }
 
     @androidx.annotation.OptIn(markerClass = [TransformExperimental::class])
-    private fun createImageProxyTransform(imageProxy: ImageProxy): OutputTransform? =
+    private fun createImageProxyTransform(
+        imageProxy: ImageProxy,
+        useRotationDegrees: Boolean
+    ): OutputTransform? =
         runCatching {
             ImageProxyTransformFactory().apply {
                 setUsingCropRect(false)
-                setUsingRotationDegrees(true)
+                setUsingRotationDegrees(useRotationDegrees)
             }.getOutputTransform(imageProxy)
         }.getOrNull()
+
+    private fun ImageProxy.rotatedSourceSize(): Size {
+        val normalizedRotation = ((imageInfo.rotationDegrees % FULL_ROTATION_DEGREES) +
+            FULL_ROTATION_DEGREES) % FULL_ROTATION_DEGREES
+        return if (normalizedRotation == RIGHT_ANGLE_DEGREES ||
+            normalizedRotation == THREE_QUARTER_ROTATION_DEGREES
+        ) {
+            Size(height, width)
+        } else {
+            Size(width, height)
+        }
+    }
+
+    private fun mapRotatedImageToPreviewCoordinates(
+        previewView: PreviewView,
+        sourceSize: Size,
+        detections: List<DetectionResult>
+    ): List<DetectionResult> {
+        if (detections.isEmpty() ||
+            sourceSize.width <= 0 ||
+            sourceSize.height <= 0 ||
+            previewView.width <= 0 ||
+            previewView.height <= 0
+        ) {
+            return emptyList()
+        }
+
+        val sourceWidth = sourceSize.width.toFloat()
+        val sourceHeight = sourceSize.height.toFloat()
+        val previewWidth = previewView.width.toFloat()
+        val previewHeight = previewView.height.toFloat()
+        val scale = maxOf(previewWidth / sourceWidth, previewHeight / sourceHeight)
+        val offsetX = (previewWidth - sourceWidth * scale) / 2f
+        val offsetY = (previewHeight - sourceHeight * scale) / 2f
+
+        return detections.map { detection ->
+            val box = detection.boundingBox
+            val mappedBox = RectF(
+                box.left * scale + offsetX,
+                box.top * scale + offsetY,
+                box.right * scale + offsetX,
+                box.bottom * scale + offsetY
+            )
+            mappedBox.left = mappedBox.left.coerceIn(0f, previewWidth)
+            mappedBox.top = mappedBox.top.coerceIn(0f, previewHeight)
+            mappedBox.right = mappedBox.right.coerceIn(0f, previewWidth)
+            mappedBox.bottom = mappedBox.bottom.coerceIn(0f, previewHeight)
+            mappedBox.sort()
+            detection.copy(boundingBox = mappedBox)
+        }
+    }
 
     @androidx.annotation.OptIn(markerClass = [TransformExperimental::class])
     private fun mapToPreviewCoordinates(
@@ -391,8 +464,11 @@ class GimbalViewModel(
     }
 
     companion object {
-        private const val CUSTOM_TFLITE_MODEL_ASSET = "models/epoch_149_int8.tflite"
-        private const val CUSTOM_TFLITE_TARGET_FPS = 4
+        private const val CUSTOM_TFLITE_MODEL_ASSET = "models/epoch_149_416_fp16.tflite"
+        private const val CUSTOM_TFLITE_TARGET_FPS = 12
+        private const val FULL_ROTATION_DEGREES = 360
+        private const val RIGHT_ANGLE_DEGREES = 90
+        private const val THREE_QUARTER_ROTATION_DEGREES = 270
 
         val TrackableClassLabels = listOf(
             "pedestrian",
@@ -426,7 +502,7 @@ class GimbalViewModel(
                                 DetectorPipeline.CUSTOM_TFLITE -> TFLiteDetectorEngine(
                                     context = applicationContext,
                                     modelAssetPath = CUSTOM_TFLITE_MODEL_ASSET,
-                                    acceleration = TFLiteDetectorEngine.Acceleration.CPU,
+                                    acceleration = TFLiteDetectorEngine.Acceleration.GPU,
                                     labels = TrackableClassLabels,
                                     configuredNumClasses = TrackableClassLabels.size,
                                     targetInferenceFps = CUSTOM_TFLITE_TARGET_FPS

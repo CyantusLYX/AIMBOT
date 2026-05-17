@@ -228,6 +228,7 @@ private fun GimbalCameraScreen(
                 lifecycleOwner = lifecycleOwner,
                 previewView = previewView,
                 viewModel = viewModel,
+                detectorPipeline = detectorPipeline,
                 analysisExecutor = analysisExecutor
             )
         }
@@ -275,9 +276,17 @@ private fun CameraBindingEffect(
     lifecycleOwner: LifecycleOwner,
     previewView: PreviewView,
     viewModel: GimbalViewModel,
+    detectorPipeline: DetectorPipeline,
     analysisExecutor: ExecutorService
 ) {
-    DisposableEffect(context, lifecycleOwner, previewView, viewModel, analysisExecutor) {
+    DisposableEffect(
+        context,
+        lifecycleOwner,
+        previewView,
+        viewModel,
+        detectorPipeline,
+        analysisExecutor
+    ) {
         var disposed = false
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         val mainExecutor = ContextCompat.getMainExecutor(context)
@@ -296,6 +305,7 @@ private fun CameraBindingEffect(
                             lifecycleOwner = lifecycleOwner,
                             previewView = previewView,
                             viewModel = viewModel,
+                            detectorPipeline = detectorPipeline,
                             analysisExecutor = analysisExecutor
                         )
                     }
@@ -320,6 +330,7 @@ private fun bindCameraUseCases(
     lifecycleOwner: LifecycleOwner,
     previewView: PreviewView,
     viewModel: GimbalViewModel,
+    detectorPipeline: DetectorPipeline,
     analysisExecutor: ExecutorService
 ) {
     val targetRotation = previewView.display?.rotation ?: Surface.ROTATION_0
@@ -339,11 +350,19 @@ private fun bindCameraUseCases(
         )
         .build()
 
-    val imageAnalysis = ImageAnalysis.Builder()
+    val imageAnalysisBuilder = ImageAnalysis.Builder()
         .setTargetRotation(targetRotation)
         .setResolutionSelector(analysisResolutionSelector)
         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
         .setBackgroundExecutor(analysisExecutor)
+
+    if (detectorPipeline == DetectorPipeline.CUSTOM_TFLITE) {
+        imageAnalysisBuilder.setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+    } else {
+        imageAnalysisBuilder.setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+    }
+
+    val imageAnalysis = imageAnalysisBuilder
         .build()
         .also { analysisUseCase ->
             analysisUseCase.setAnalyzer(analysisExecutor) { imageProxy ->
