@@ -37,6 +37,9 @@ class DetectionResult:
 
     frame: np.ndarray
     detections: np.ndarray
+    context: object | None = None
+    submitted_at_s: float = 0.0
+    completed_at_s: float = 0.0
 
 
 class FramePrefetcher:
@@ -180,7 +183,8 @@ class AsyncDetector:
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self._pending: Optional[concurrent.futures.Future[DetectionResult]] = None
 
-    def _run_inference(self, frame: np.ndarray) -> DetectionResult:
+    def _run_inference(self, frame: np.ndarray, context: object | None = None) -> DetectionResult:
+        submitted_at_s = time.monotonic()
         proc_frame = self.preprocessor.resize(frame)
         detections = self.detector.detect(proc_frame)
         if detections.size:
@@ -194,7 +198,13 @@ class AsyncDetector:
                 detections[:, [1, 3]] = np.clip(detections[:, [1, 3]], 0, frame.shape[0] - 1)
         if self.class_filter is not None and detections.size:
             detections = self.class_filter(detections)
-        return DetectionResult(frame=frame, detections=detections)
+        return DetectionResult(
+            frame=frame,
+            detections=detections,
+            context=context,
+            submitted_at_s=submitted_at_s,
+            completed_at_s=time.monotonic(),
+        )
 
     def submit(self, frame: np.ndarray) -> Optional[DetectionResult]:
         """Submit *frame* for inference and return the previous result.
@@ -212,6 +222,26 @@ class AsyncDetector:
         if previous is None:
             return None
         return previous.result()
+
+    def submit_latest(self, frame: np.ndarray, context: object | None = None) -> tuple[Optional[DetectionResult], bool]:
+        """Non-blocking latest-frame submission for interactive control loops.
+
+        If inference is still running, *frame* is dropped and the caller stays
+        responsive. If the previous inference is ready, its result is returned
+        and *frame* becomes the next pending inference.
+
+        Returns:
+            ``(result, accepted)`` where ``result`` is the completed previous
+            inference, and ``accepted`` indicates whether *frame* was submitted.
+        """
+        if self._pending is None:
+            self._pending = self._executor.submit(self._run_inference, frame, context)
+            return None, True
+        if not self._pending.done():
+            return None, False
+        result = self._pending.result()
+        self._pending = self._executor.submit(self._run_inference, frame, context)
+        return result, True
 
     def flush(self) -> Optional[DetectionResult]:
         """Block until the last pending inference completes and return it.

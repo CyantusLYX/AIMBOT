@@ -46,3 +46,7 @@ build/
 dist/
 *.spec
  *.zip
+
+
+src_android_eye/app/build/
+src_android_eye/build/
