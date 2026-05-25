@@ -22,7 +22,7 @@ from control.target_controller import TargetController
 from core.config import PipelineConfig
 from pipeline.workers import AsyncDetector, FramePrefetcher, GpuPreprocessor, ReIDHelper
 from services.tracking_service import TrackingService
-from tracking.byte_tracker import ByteTrack
+from tracking.tracker_adapter import create_tracker_backend
 from ui.viewer import OpenCVViewer
 
 DEFAULT_CONFIG = PipelineConfig()
@@ -46,6 +46,7 @@ class FPSMeter:
 
 def parse_args() -> argparse.Namespace:
     runtime = DEFAULT_CONFIG.runtime
+    tracking = DEFAULT_CONFIG.tracking
     parser = argparse.ArgumentParser(description="AIMBOT pipeline")
     parser.add_argument("--weights", type=str, default=runtime.weights, help="YOLOv7 權重路徑")
     parser.add_argument("--source", type=str, default=runtime.source, help="攝影機索引或影片路徑")
@@ -65,6 +66,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--serial-port", type=str, default=runtime.serial_port, help="雲台序列埠")
     parser.add_argument("--fps", type=int, default=runtime.fps, help="控制迴圈目標 FPS")
     parser.add_argument("--max-frames", type=int, default=runtime.max_frames, help="限制處理影格數量，用於快速測試")
+    parser.add_argument(
+        "--tracker-backend",
+        choices=("botsort", "bytetrack"),
+        default=tracking.tracker_backend,
+        help="追蹤器後端，預設使用 BoT-SORT",
+    )
+    parser.add_argument("--tracker-module", default="bytetrack_cpp", help="ByteTrack C++ binding 模組名稱")
+    parser.add_argument("--require-cpp-tracker", action="store_true", help="ByteTrack 模式下要求 C++ binding")
+    parser.add_argument("--track-thresh", type=float, default=tracking.track_high_thresh, help="BoT-SORT high threshold / ByteTrack new-track threshold")
+    parser.add_argument("--track-low-thresh", type=float, default=tracking.track_low_thresh, help="BoT-SORT low detection threshold")
+    parser.add_argument("--new-track-thresh", type=float, default=tracking.new_track_thresh, help="BoT-SORT new-track threshold")
+    parser.add_argument("--track-match-iou", type=float, default=tracking.track_match_iou, help="ByteTrack IoU match threshold")
+    parser.add_argument("--track-max-age", type=int, default=tracking.track_max_age, help="Frames to keep unmatched tracks alive")
+    parser.add_argument("--track-min-hits", type=int, default=tracking.track_min_hits, help="Hits before exposing a track")
+    parser.add_argument("--botsort-match-thresh", type=float, default=tracking.botsort_match_thresh, help="BoT-SORT association distance threshold")
+    parser.add_argument("--botsort-proximity-thresh", type=float, default=tracking.botsort_proximity_thresh, help="BoT-SORT IoU-distance gate before appearance matching")
+    parser.add_argument("--botsort-appearance-thresh", type=float, default=tracking.botsort_appearance_thresh, help="BoT-SORT maximum embedding distance")
+    parser.add_argument("--botsort-second-match-thresh", type=float, default=tracking.botsort_second_match_thresh, help="BoT-SORT low-score association threshold")
     return parser.parse_args()
 
 
@@ -86,7 +105,20 @@ def build_runtime_config(args: argparse.Namespace) -> PipelineConfig:
             fps=args.fps,
             max_frames=args.max_frames,
         ),
-        tracking=DEFAULT_CONFIG.tracking,
+        tracking=replace(
+            DEFAULT_CONFIG.tracking,
+            tracker_backend=args.tracker_backend,
+            track_high_thresh=args.track_thresh,
+            track_low_thresh=args.track_low_thresh,
+            new_track_thresh=args.new_track_thresh,
+            track_match_iou=args.track_match_iou,
+            track_max_age=args.track_max_age,
+            track_min_hits=args.track_min_hits,
+            botsort_match_thresh=args.botsort_match_thresh,
+            botsort_proximity_thresh=args.botsort_proximity_thresh,
+            botsort_appearance_thresh=args.botsort_appearance_thresh,
+            botsort_second_match_thresh=args.botsort_second_match_thresh,
+        ),
         control=DEFAULT_CONFIG.control,
     )
 
@@ -218,12 +250,31 @@ def main() -> None:
         return
 
     detector, embedder = create_detector_and_embedder(runtime)
-    tracker = ByteTrack(
-        enable_reid=runtime.enable_reid,
-        reid_match_thresh=tracking.reid_similarity,
-        feature_momentum=tracking.feature_momentum,
-        feature_min_similarity=tracking.reid_similarity,
-        reid_max_center_dist=tracking.reid_distance,
+    try:
+        tracker = create_tracker_backend(
+            tracker_backend=tracking.tracker_backend,
+            cpp_module=args.tracker_module,
+            track_thresh=tracking.track_high_thresh,
+            match_iou_thresh=tracking.track_match_iou,
+            max_age=tracking.track_max_age,
+            min_hits=tracking.track_min_hits,
+            enable_reid=runtime.enable_reid,
+            reid_match_thresh=tracking.reid_similarity,
+            reid_max_center_dist=tracking.reid_distance,
+            require_cpp=args.require_cpp_tracker,
+            track_low_thresh=tracking.track_low_thresh,
+            new_track_thresh=tracking.new_track_thresh,
+            botsort_match_thresh=tracking.botsort_match_thresh,
+            botsort_proximity_thresh=tracking.botsort_proximity_thresh,
+            botsort_appearance_thresh=tracking.botsort_appearance_thresh,
+            botsort_second_match_thresh=tracking.botsort_second_match_thresh,
+            feature_momentum=tracking.feature_momentum,
+        )
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+    print(
+        f"使用追蹤器: {tracking.tracker_backend} "
+        f"max_age={tracking.track_max_age} min_hits={tracking.track_min_hits}"
     )
     target_ctrl = TargetController(max_lost_frames=int(runtime.fps * 2), reacquire_thresh=tracking.reid_similarity)
     if not initialize_reference_target(mode, reference_image_path, embedder, target_ctrl):

@@ -6,6 +6,7 @@ from typing import Iterable, Optional
 
 import numpy as np
 
+from tracking.bot_sort import BoTSort
 from tracking.byte_tracker import ByteTrack
 
 
@@ -175,3 +176,63 @@ class ByteTrackAdapter:
             "feature": None,
             "time_since_update": 0,
         }
+
+
+def create_tracker_backend(
+    *,
+    tracker_backend: str = "botsort",
+    cpp_module: str = "bytetrack_cpp",
+    track_thresh: Optional[float] = None,
+    match_iou_thresh: float = 0.2,
+    max_age: int = 30,
+    min_hits: int = 3,
+    enable_reid: bool = False,
+    reid_match_thresh: float = 0.65,
+    reid_max_center_dist: float = 0.25,
+    require_cpp: bool = False,
+    track_low_thresh: float = 0.1,
+    new_track_thresh: float = 0.6,
+    botsort_match_thresh: float = 0.8,
+    botsort_proximity_thresh: float = 0.5,
+    botsort_appearance_thresh: float = 0.25,
+    botsort_second_match_thresh: float = 0.5,
+    feature_momentum: float = 0.9,
+) -> object:
+    """Create a tracker backend that satisfies ``TrackingService``'s protocol."""
+    backend = tracker_backend.lower()
+    if backend == "botsort":
+        if require_cpp:
+            raise RuntimeError("--require-cpp-tracker is only supported with --tracker-backend bytetrack")
+        track_high_thresh = 0.5 if track_thresh is None else float(track_thresh)
+        tracker = BoTSort(
+            track_high_thresh=track_high_thresh,
+            track_low_thresh=track_low_thresh,
+            new_track_thresh=new_track_thresh,
+            track_buffer=max_age,
+            max_age=max_age,
+            min_hits=min_hits,
+            match_thresh=botsort_match_thresh,
+            proximity_thresh=botsort_proximity_thresh,
+            appearance_thresh=botsort_appearance_thresh,
+            second_match_thresh=botsort_second_match_thresh,
+            enable_reid=enable_reid,
+            feature_momentum=feature_momentum,
+            feature_min_similarity=max(0.0, 1.0 - 2.0 * botsort_appearance_thresh),
+        )
+        suffix = "-ReID" if enable_reid else ""
+        print(f"[TRACKER] using BoT-SORT{suffix}")
+        return tracker
+    if backend == "bytetrack":
+        bytetrack_thresh = 0.65 if track_thresh is None else float(track_thresh)
+        return ByteTrackAdapter(
+            cpp_module=cpp_module,
+            track_thresh=bytetrack_thresh,
+            match_iou_thresh=match_iou_thresh,
+            max_age=max_age,
+            min_hits=min_hits,
+            enable_reid=enable_reid,
+            reid_match_thresh=reid_match_thresh,
+            reid_max_center_dist=reid_max_center_dist,
+            require_cpp=require_cpp,
+        )
+    raise ValueError(f"unknown tracker backend: {tracker_backend}")

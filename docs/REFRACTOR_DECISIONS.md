@@ -19,6 +19,8 @@
 10. [Google-style docstrings](#10-google-style-docstrings)
 11. [self.serial → self.\_serial rename](#11-selfserial--self_serial-rename)
 12. [Optional[Set[int]] instead of set[int] in viewer.py](#12-optionalsetint-instead-of-setint-in-viewerpy)
+13. [Distributed PC brain ownership in src/app](#13-distributed-pc-brain-ownership-in-srcapp)
+14. [Local BoT-SORT backend as default tracker](#14-local-bot-sort-backend-as-default-tracker)
 
 ---
 
@@ -287,3 +289,111 @@ than the built-in `set[int]`.
   accustomed to pre-3.9 codebases.
 
 **Risk**: None — functionally identical.
+
+---
+
+## 13. Distributed PC brain ownership in src/app
+
+**What**: The distributed host application was moved from
+`scripts/gimbal_brain_pc.py` to `src/app/gimbal_brain_pc.py`.
+`scripts/gimbal_brain_pc.py` is now a thin compatibility wrapper that imports
+the app module and calls `main()`.
+
+**Why**:
+
+- The PC brain is application assembly, not an ad hoc script. It owns the
+  top-level loop that connects UDP frames, detector workers, tracking,
+  target selection, UI, and gimbal output.
+- `src/app` already exists as the application-level namespace and is included
+  in the packaged modules in `pyproject.toml`.
+- Keeping the full implementation in `scripts/` hid reusable logic from
+  package-level tests and encouraged duplicate helpers.
+- The PC brain already depends on `src` modules, so moving it under `src/app`
+  makes the dependency direction explicit instead of relying on script-local
+  `sys.path` setup inside the implementation.
+
+**Existing src code to reuse**:
+
+| Concern | Existing module | Current use |
+| ------- | --------------- | ---------------------- |
+| UDP video/IMU input | `src/adapters/udp_stream.py` | Already used by the PC brain. |
+| YOLO inference | `src/detection/detector.py` | Already used. |
+| Async/latest-frame inference | `src/pipeline/workers.py` | Already uses `AsyncDetector.submit_latest()` and `GpuPreprocessor`. |
+| Re-ID embedding scheduling | `src/pipeline/workers.py` | Already uses `ReIDHelper` when enabled. |
+| Tracking backend selection | `src/tracking/tracker_adapter.py` | Already uses C++ binding fallback and Python path for Re-ID. |
+| Tracking composition | `src/services/tracking_service.py` | Now reused after widening the tracker type to a backend protocol. |
+| Target click/lifecycle logic | `src/control/target_controller.py` | Reuse for point selection and error computation where semantics match. |
+| Control math | `src/control/pid.py` | Prefer PID or a small control service over script-local P-control. |
+| ESP32 ASCII protocol | `src/control/ascii_gimbal_controller.py` | Already used by the PC brain. |
+
+**App-local pieces that may remain app-specific**:
+
+- `BrainUi` / pygame operator panel currently lives in
+  `src/app/gimbal_brain_pc.py`. Extract it to `src/ui/brain_viewer.py` only if
+  it needs independent tests or reuse.
+- The auto-target policy in the PC brain currently selects the highest scoring
+  live track. If this behavior differs from `TargetController`, keep it as an
+  explicit app policy rather than forcing it into the generic controller.
+
+**Alternatives considered**:
+
+- Keep `gimbal_brain_pc.py` in `scripts/`: simplest short-term path, but it
+  leaves a large executable outside the layered architecture and repeats
+  helpers already present in the package.
+- Merge it into `scripts/run_pipeline.py`: rejected because the local-video
+  pipeline and distributed UDP brain have different input, UI, and gimbal
+  command semantics.
+- Move every helper into shared packages immediately: too broad. Only extract
+  helpers when they have a second caller or need focused tests.
+
+**Risk**: Medium. Moving the file changed import context, so optional imports
+(`pygame`, `torchreid`, serial) and launch commands need smoke tests. Runtime
+behavior should remain unchanged because the wrapper calls the same `main()`
+function now hosted by `src/app/gimbal_brain_pc.py`.
+
+**Validation**:
+
+```sh
+python -m compileall src scripts
+PYTHONPATH=src python -c "from app.gimbal_brain_pc import main; print(main.__name__)"
+```
+
+The second command verifies the app module imports without running the UDP/UI
+loop. Runtime smoke still requires an Android sensor node or simulator sending
+UDP frames.
+
+---
+
+## 14. Local BoT-SORT backend as default tracker
+
+**What**: Added a local `BoTSort` tracker backend in `src/tracking/bot_sort.py`
+and made `--tracker-backend botsort` the default for both the local pipeline
+and distributed PC brain. ByteTrack remains available with
+`--tracker-backend bytetrack`.
+
+**Why**:
+
+- BoT-SORT improves identity preservation by combining motion with optional
+  appearance embeddings while keeping the existing track-dict contract.
+- A local backend avoids adding BoxMOT as a dependency. BoxMOT is useful for
+  reference, but its AGPL-3.0 license is not appropriate as a direct dependency
+  for this project.
+- `TrackingService` already accepts a tracker protocol, so swapping backends
+  does not require UI/control-loop changes.
+
+**Implementation notes**:
+
+- First version implements XYWH constant-velocity Kalman prediction,
+  high/low-confidence association, optional OSNet Re-ID appearance matching,
+  and lost-track buffering.
+- Camera-motion compensation is intentionally deferred.
+- Re-ID remains opt-in through `--enable-reid` to avoid surprise torchreid/GPU
+  startup cost.
+
+**Validation**:
+
+```sh
+.venv/bin/python -m unittest tests.test_bot_sort tests.test_tracker_adapter
+.venv/bin/python scripts/run_pipeline.py --help
+.venv/bin/python scripts/gimbal_brain_pc.py --help
+```

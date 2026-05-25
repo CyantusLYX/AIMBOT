@@ -26,6 +26,17 @@ class RuntimeConfig:
 class TrackingConfig:
     """Tracking/Re-ID strategy parameters."""
 
+    tracker_backend: str = "botsort"
+    track_high_thresh: float = 0.5
+    track_low_thresh: float = 0.1
+    new_track_thresh: float = 0.6
+    track_match_iou: float = 0.2
+    track_max_age: int = 30
+    track_min_hits: int = 3
+    botsort_match_thresh: float = 0.8
+    botsort_proximity_thresh: float = 0.5
+    botsort_appearance_thresh: float = 0.25
+    botsort_second_match_thresh: float = 0.5
     reid_similarity: float = 0.6
     reid_distance: float = 0.25
     reid_candidates: int = 6

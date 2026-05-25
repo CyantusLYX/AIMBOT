@@ -6,6 +6,24 @@ import numpy as np
 import torch
 
 
+def _torch_xpu_available() -> bool:
+    return bool(hasattr(torch, "xpu") and torch.xpu.is_available())
+
+
+def _select_torch_device(device: Optional[str]) -> str:
+    if device is None:
+        if torch.cuda.is_available():
+            return "cuda:0"
+        if _torch_xpu_available():
+            return "xpu:0"
+        return "cpu"
+    if device == "cuda":
+        return "cuda:0"
+    if device == "xpu":
+        return "xpu:0"
+    return device
+
+
 class YoloV7Detector:
     """Thin wrapper around a YOLOv7 PyTorch model."""
 
@@ -21,13 +39,11 @@ class YoloV7Detector:
         if not resolved.exists():
             raise FileNotFoundError(f"找不到權重檔案: {resolved}")
 
-        default_device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        if device is None:
-            target_device = default_device
-        else:
-            target_device = "cuda:0" if device == "cuda" else device
+        target_device = _select_torch_device(device)
         if target_device.startswith("cuda") and not torch.cuda.is_available():
             raise RuntimeError("已要求使用 CUDA，但目前環境無法偵測到支援的 GPU 或 CUDA 驅動程式。")
+        if target_device.startswith("xpu") and not _torch_xpu_available():
+            raise RuntimeError("已要求使用 Intel XPU，但目前 PyTorch 環境無法偵測到可用的 XPU 裝置。")
         self.device = target_device
 
         original_load = torch.load

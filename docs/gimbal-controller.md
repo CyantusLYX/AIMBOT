@@ -45,9 +45,35 @@ H:1
 If no valid velocity command is received for more than `500 ms`, the firmware
 sets both target speeds to zero. Invalid commands do not refresh the fail-safe.
 
-The PC brain uses `H:1` when tracking is paused or a target is lost. This keeps
-basic damping/holding torque on the motors. `E:0` is reserved for maintenance
-cases where holding torque must be removed.
+The distributed PC brain uses `H:1` when tracking is paused or a target is lost.
+This keeps basic damping/holding torque on the motors. `E:0` is reserved for
+maintenance cases where holding torque must be removed.
+
+## PC Brain Application Boundary
+
+The PC brain is the host-side distributed application that receives Android
+video/IMU packets over UDP, runs detection/tracking, renders the operator panel,
+and sends ASCII gimbal commands.
+
+Application boundary:
+
+- Implementation home: `src/app/gimbal_brain_pc.py`
+- Compatibility wrapper: `scripts/gimbal_brain_pc.py`
+- UDP adapter: `src/adapters/udp_stream.py`
+- ASCII gimbal transport: `src/control/ascii_gimbal_controller.py`
+
+The compatibility script remains the simplest launch path from a source
+checkout:
+
+```bash
+python scripts/gimbal_brain_pc.py --listen-host 0.0.0.0 --port 5005 --serial-port /dev/ttyUSB0
+```
+
+Installed or `PYTHONPATH=src` checkouts can also launch the app module directly:
+
+```bash
+python -m app.gimbal_brain_pc --listen-host 0.0.0.0 --port 5005 --serial-port /dev/ttyUSB0
+```
 
 ## Manual Control Tool
 

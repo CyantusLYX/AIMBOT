@@ -163,8 +163,9 @@ raise deliberately.
 
 ## 8. Logging vs. print
 
-- Use `print()` only in `scripts/` (CLI entry points) for user-facing status
-  messages.
+- Use `print()` only in `scripts/` and `src/app/` for user-facing status
+  messages. `src/app/` is allowed because it owns application assembly, CLI/UI
+  orchestration, and operator-facing output.
 - Inside `src/` library code, prefer `logging` at the appropriate level so
   callers can control verbosity.
 - **Never** log sensitive data (serial port commands, raw frame data at high

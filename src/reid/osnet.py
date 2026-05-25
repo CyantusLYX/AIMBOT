@@ -14,6 +14,24 @@ except ImportError as exc:  # pragma: no cover
     raise ImportError("缺少 torchreid，相依套件列於 requirements.txt。") from exc
 
 
+def _torch_xpu_available() -> bool:
+    return bool(hasattr(torch, "xpu") and torch.xpu.is_available())
+
+
+def _select_torch_device(device: Optional[str]) -> str:
+    if device is None:
+        if torch.cuda.is_available():
+            return "cuda:0"
+        if _torch_xpu_available():
+            return "xpu:0"
+        return "cpu"
+    if device == "cuda":
+        return "cuda:0"
+    if device == "xpu":
+        return "xpu:0"
+    return device
+
+
 class OSNetEmbedder:
     """Thin wrapper around a torchreid OSNet model for Re-ID feature extraction.
 
@@ -42,15 +60,11 @@ class OSNetEmbedder:
         model_name: str = "osnet_x0_25",
         weights_path: Optional[str] = None,
     ) -> None:
-        default_device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        if device is None:
-            target_device = default_device
-        else:
-            target_device = device
-            if target_device == "cuda":
-                target_device = "cuda:0"
+        target_device = _select_torch_device(device)
         if target_device.startswith("cuda") and not torch.cuda.is_available():
             raise RuntimeError("要求使用 CUDA 作為 Re-ID 裝置，但未偵測到可用 GPU。")
+        if target_device.startswith("xpu") and not _torch_xpu_available():
+            raise RuntimeError("要求使用 Intel XPU 作為 Re-ID 裝置，但未偵測到可用 XPU。")
         self.device = target_device
         self.model_name = model_name
         self.model = torchreid.models.build_model(model_name, num_classes=1, pretrained=True)

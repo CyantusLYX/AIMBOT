@@ -109,3 +109,62 @@ python scripts/run_pipeline.py \
     --source data/DJI_20250422132606_0030_D.MP4 \
     --max-frames 30
 ```
+
+## 分散式 PC Brain / Distributed PC Brain
+
+The distributed PC brain receives Android UDP video/IMU packets and drives the
+ESP32 gimbal through the ASCII firmware protocol.
+
+From a source checkout, use the compatibility script:
+
+```powershell
+python scripts/gimbal_brain_pc.py `
+    --listen-host 0.0.0.0 `
+    --port 5005 `
+    --weights models/epoch_149.pt `
+    --device cuda --half `
+    --serial-port /dev/ttyUSB0
+```
+
+For direct source debugging, the app file also supports being launched by path:
+
+```powershell
+python src/app/gimbal_brain_pc.py --help
+```
+
+The implementation lives in `src/app/gimbal_brain_pc.py`, and
+`scripts/gimbal_brain_pc.py` is only a wrapper. Installed or `PYTHONPATH=src`
+checkouts can also launch the app module directly:
+
+```powershell
+python -m app.gimbal_brain_pc `
+    --listen-host 0.0.0.0 `
+    --port 5005 `
+    --weights models/epoch_149.pt `
+    --device cuda --half `
+    --serial-port /dev/ttyUSB0
+```
+
+For bench testing without motor output, add `--dry-run`; for maintenance cases
+where holding torque must be removed at startup, add `--motors-off`.
+
+## Tracker Backend
+
+BoT-SORT is the default tracker backend for both the local pipeline and the
+distributed PC brain:
+
+```powershell
+python scripts/run_pipeline.py --tracker-backend botsort --source data/demo.mp4 --dry-run
+python scripts/gimbal_brain_pc.py --tracker-backend botsort --dry-run
+```
+
+ByteTrack remains available for compatibility:
+
+```powershell
+python scripts/run_pipeline.py --tracker-backend bytetrack --source data/demo.mp4 --dry-run
+```
+
+The distributed PC brain enables Re-ID by default with the current real-gimbal
+BoT-SORT settings. Use `--disable-reid` for no-ReID comparison runs. BoT-SORT
+camera-motion compensation is intentionally not included in this first local
+backend.

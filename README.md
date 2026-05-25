@@ -1,7 +1,7 @@
 # AIMBOT
 
-> 即時影像伺服追蹤系統 — YOLOv7 + ByteTrack + OSNet Re-ID + PID 雲台控制  
-> Real-time visual servo tracking — YOLOv7 + ByteTrack + OSNet Re-ID + PID gimbal control
+> 即時影像伺服追蹤系統 — YOLOv7 + BoT-SORT/ByteTrack + OSNet Re-ID + PID 雲台控制  
+> Real-time visual servo tracking — YOLOv7 + BoT-SORT/ByteTrack + OSNet Re-ID + PID gimbal control
 
 ---
 
@@ -33,7 +33,7 @@ Video Source / Camera
  ReIDHelper       ─── OSNet embeddings for top-K candidates
         │
         ▼
- ByteTrack        ─── IoU + Re-ID two-stage assignment
+ BoT-SORT         ─── motion + optional Re-ID association
         │  track list
         ▼
  TargetController ─── lock / lost-frame count / reacquire
@@ -60,17 +60,19 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a detailed breakdown.
 
 ```
 scripts/
-    run_pipeline.py       # CLI entry point / 主程式入口
+    run_pipeline.py       # Local pipeline CLI entry point / 本機管線入口
+    gimbal_brain_pc.py    # Thin wrapper for src/app/gimbal_brain_pc.py
 src/
     adapters/
         video_source.py   # Video I/O adapter (capture open/validation)
     app/
-        __init__.py       # Application-level assembly namespace
+        gimbal_brain_pc.py  # Distributed UDP PC brain application
     core/
         config.py         # Frozen dataclass config tree (PipelineConfig)
     detection/
         detector.py       # YOLOv7 inference wrapper
     tracking/
+        bot_sort.py      # Local BoT-SORT-ReID tracker backend
         byte_tracker.py   # IoU + Re-ID multi-object tracker
     reid/
         osnet.py          # OSNet feature extractor (torchreid)
@@ -100,7 +102,8 @@ docs/
 | 元件 / Component                                        | 狀態 / Status                |
 | ------------------------------------------------------- | ---------------------------- |
 | YOLOv7 偵測 / Detection (`detection/detector.py`)       | ✅ GPU / FP16                |
-| ByteTrack 追蹤 / Tracking (`tracking/byte_tracker.py`)  | ✅ IoU + Re-ID               |
+| BoT-SORT 追蹤 / Tracking (`tracking/bot_sort.py`)       | ✅ default backend           |
+| ByteTrack 追蹤 / Tracking (`tracking/byte_tracker.py`)  | ✅ fallback backend          |
 | OSNet Re-ID (`reid/osnet.py`)                           | ✅ batch encode, EMA feature |
 | PID 控制 / PID control (`control/pid.py`)               | ✅                           |
 | 雲台通訊 / Gimbal comm (`control/gimbal_controller.py`) | ✅ dry-run + serial          |
@@ -195,6 +198,20 @@ python scripts/run_pipeline.py \
     --enable-reid --reid-model osnet_x0_75
 ```
 
+### 分散式 PC Brain / Distributed PC Brain
+
+```powershell
+python scripts/gimbal_brain_pc.py \
+    --listen-host 0.0.0.0 \
+    --port 5005 \
+    --weights models/epoch_149.pt \
+    --device cuda --half \
+    --serial-port /dev/ttyUSB0
+```
+
+The implementation lives in `src/app/gimbal_brain_pc.py`; the script path is a
+compatibility wrapper.
+
 ### 常用參數 / Common Arguments
 
 | 參數 / Argument   | 預設 / Default        | 說明 / Description                                    |
@@ -212,6 +229,10 @@ python scripts/run_pipeline.py \
 | `--reid-model`    | `osnet_x0_75`         | torchreid model name                                  |
 | `--reid-weights`  | —                     | Path to custom Re-ID weights (optional)               |
 | `--process-scale` | `0` (auto)            | Detector input scale factor; `0` = auto by resolution |
+| `--tracker-backend` | `botsort`           | Tracker backend: `botsort` or `bytetrack`             |
+| `--track-thresh` | `0.5`                 | BoT-SORT high-confidence threshold                    |
+| `--track-low-thresh` | `0.1`             | BoT-SORT low-confidence association threshold         |
+| `--new-track-thresh` | `0.6`             | Minimum score to initialize a BoT-SORT track          |
 
 ### 操作模式 / Operating Modes
 
