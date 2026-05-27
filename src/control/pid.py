@@ -74,3 +74,87 @@ class PIDController:
             lo, hi = self.clamp
             output = max(lo, min(hi, output))
         return output
+
+
+class VelocityPIDAxisController:
+    """Velocity-oriented PID controller for one gimbal axis.
+
+    Unlike :class:`PIDController`, this controller accepts pixel error directly
+    so the output sign matches the current proportional controller used by the
+    PC brain: positive error produces positive velocity.
+    """
+
+    def __init__(
+        self,
+        gains: PIDGains,
+        *,
+        deadband: float = 0.0,
+        min_speed: float = 0.0,
+        output_limit: float = 0.0,
+        integral_limit: float = 0.0,
+        derivative_alpha: float = 0.25,
+        output_slew_rate: float = 0.0,
+        max_dt: float = 0.25,
+        fallback_dt: float = 1.0 / 30.0,
+    ) -> None:
+        self.gains = gains
+        self.deadband = abs(float(deadband))
+        self.min_speed = abs(float(min_speed))
+        self.output_limit = abs(float(output_limit))
+        self.integral_limit = abs(float(integral_limit))
+        self.derivative_alpha = max(0.0, min(1.0, float(derivative_alpha)))
+        self.output_slew_rate = max(0.0, float(output_slew_rate))
+        self.max_dt = max(float(fallback_dt), float(max_dt))
+        self.fallback_dt = max(1e-6, float(fallback_dt))
+        self.integral = 0.0
+        self.previous_error: Optional[float] = None
+        self.filtered_derivative = 0.0
+        self.previous_output = 0.0
+
+    def reset(self) -> None:
+        self.integral = 0.0
+        self.previous_error = None
+        self.filtered_derivative = 0.0
+        self.previous_output = 0.0
+
+    def update(self, error: float, dt: float) -> float:
+        error = float(error)
+        if abs(error) <= self.deadband:
+            self.reset()
+            return 0.0
+
+        effective_dt = float(dt)
+        derivative = 0.0
+        valid_dt = 0.0 < effective_dt <= self.max_dt
+        if not valid_dt:
+            effective_dt = self.fallback_dt
+            self.previous_error = error
+            self.filtered_derivative = 0.0
+        elif self.previous_error is not None:
+            raw_derivative = (error - self.previous_error) / effective_dt
+            self.filtered_derivative = (
+                self.derivative_alpha * raw_derivative
+                + (1.0 - self.derivative_alpha) * self.filtered_derivative
+            )
+            derivative = self.filtered_derivative
+        self.previous_error = error
+
+        self.integral += error * effective_dt
+        if self.integral_limit > 0.0:
+            self.integral = max(-self.integral_limit, min(self.integral_limit, self.integral))
+
+        output = (
+            self.gains.kp * error
+            + self.gains.ki * self.integral
+            + self.gains.kd * derivative
+        )
+        if output != 0.0 and self.min_speed > 0.0 and abs(output) < self.min_speed:
+            output = self.min_speed if output > 0.0 else -self.min_speed
+        if self.output_limit > 0.0:
+            output = max(-self.output_limit, min(self.output_limit, output))
+        if self.output_slew_rate > 0.0:
+            max_delta = self.output_slew_rate * effective_dt
+            delta = max(-max_delta, min(max_delta, output - self.previous_output))
+            output = self.previous_output + delta
+        self.previous_output = output
+        return output

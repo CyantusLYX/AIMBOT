@@ -59,6 +59,7 @@ volatile int32_t targetPanStepsPerSec = 0;
 volatile int32_t targetTiltStepsPerSec = 0;
 volatile uint32_t lastValidCommandMs = 0;
 volatile int32_t configuredMaxSpeedStepsPerSec = DEFAULT_MAX_SPEED_STEPS_PER_SEC;
+volatile bool driversEnabled = true;
 
 int32_t appliedPanStepsPerSec = INT32_MIN;
 int32_t appliedTiltStepsPerSec = INT32_MIN;
@@ -130,6 +131,74 @@ void forceStopTargets() {
   targetTiltStepsPerSec = 0;
   lastValidCommandMs = millis();
   portEXIT_CRITICAL(&commandMux);
+}
+
+void enableDriverOutputs() {
+  // TMC2209 EN/ENN is active-low on this board.
+  digitalWrite(ENABLE_PIN, LOW);
+  if (panStepper != nullptr) {
+    panStepper->enableOutputs();
+  }
+  if (tiltStepper != nullptr) {
+    tiltStepper->enableOutputs();
+  }
+}
+
+void disableDriverOutputs() {
+  if (panStepper != nullptr) {
+    panStepper->disableOutputs();
+  }
+  if (tiltStepper != nullptr) {
+    tiltStepper->disableOutputs();
+  }
+  digitalWrite(ENABLE_PIN, HIGH);
+}
+
+void setDriversEnabled(const bool enabled) {
+  forceStopTargets();
+  if (panStepper != nullptr) {
+    panStepper->stopMove();
+  }
+  if (tiltStepper != nullptr) {
+    tiltStepper->stopMove();
+  }
+
+  appliedPanStepsPerSec = INT32_MIN;
+  appliedTiltStepsPerSec = INT32_MIN;
+
+  portENTER_CRITICAL(&commandMux);
+  driversEnabled = enabled;
+  portEXIT_CRITICAL(&commandMux);
+
+  if (enabled) {
+    enableDriverOutputs();
+  } else {
+    disableDriverOutputs();
+  }
+  Serial.printf("OK E:%d\r\n", enabled ? 1 : 0);
+}
+
+void holdAxes() {
+  forceStopTargets();
+  if (panStepper != nullptr) {
+    panStepper->stopMove();
+  }
+  if (tiltStepper != nullptr) {
+    tiltStepper->stopMove();
+  }
+
+  appliedPanStepsPerSec = INT32_MIN;
+  appliedTiltStepsPerSec = INT32_MIN;
+
+  bool enabled = true;
+  portENTER_CRITICAL(&commandMux);
+  enabled = driversEnabled;
+  portEXIT_CRITICAL(&commandMux);
+
+  if (enabled) {
+    enableDriverOutputs();
+  }
+  Serial.println("OK H:1");
 }
 
 void setMaxSpeedLimit(const int32_t requestedMaxSpeed) {
@@ -229,10 +298,37 @@ bool handleConfigLine(char *line) {
     return true;
   }
 
+  if (line[0] == 'E') {
+    if (value != 0 && value != 1) {
+      Serial.printf("ERR E:%ld\r\n", static_cast<long>(value));
+      return false;
+    }
+    setDriversEnabled(value == 1);
+    return true;
+  }
+
+  if (line[0] == 'H') {
+    if (value != 1) {
+      Serial.printf("ERR H:%ld\r\n", static_cast<long>(value));
+      return false;
+    }
+    holdAxes();
+    return true;
+  }
+
   return false;
 }
 
 void publishCommand(const VelocityCommand &command) {
+  bool enabled = true;
+  portENTER_CRITICAL(&commandMux);
+  enabled = driversEnabled;
+  portEXIT_CRITICAL(&commandMux);
+  if (!enabled) {
+    forceStopTargets();
+    return;
+  }
+
   portENTER_CRITICAL(&commandMux);
   targetPanStepsPerSec = command.panStepsPerSec;
   targetTiltStepsPerSec = command.tiltStepsPerSec;
@@ -245,6 +341,10 @@ VelocityCommand snapshotCommand() {
   const uint32_t now = millis();
 
   portENTER_CRITICAL(&commandMux);
+  if (!driversEnabled) {
+    targetPanStepsPerSec = 0;
+    targetTiltStepsPerSec = 0;
+  }
   if ((now - lastValidCommandMs) > COMMAND_TIMEOUT_MS) {
     targetPanStepsPerSec = 0;
     targetTiltStepsPerSec = 0;
@@ -292,7 +392,7 @@ bool configureStepper(FastAccelStepper *stepper, const char *axisName,
 
   stepper->setDirectionPin(dirPin, dirHighCountsUp, DIR_CHANGE_DELAY_US);
   stepper->setEnablePin(ENABLE_PIN, true);
-  stepper->setAutoEnable(true);
+  stepper->setAutoEnable(false);
   stepper->setDelayToEnable(DRIVER_ENABLE_DELAY_US);
   stepper->setDelayToDisable(DRIVER_DISABLE_DELAY_MS);
   stepper->setSpeedInHz(1);
@@ -334,6 +434,18 @@ void applyAxisSpeed(FastAccelStepper *stepper, int32_t *lastApplied,
 }
 
 void applyVelocityTargets(const VelocityCommand &command) {
+  bool enabled = true;
+  portENTER_CRITICAL(&commandMux);
+  enabled = driversEnabled;
+  portEXIT_CRITICAL(&commandMux);
+
+  if (!enabled) {
+    applyAxisSpeed(panStepper, &appliedPanStepsPerSec, 0);
+    applyAxisSpeed(tiltStepper, &appliedTiltStepsPerSec, 0);
+    disableDriverOutputs();
+    return;
+  }
+
   applyAxisSpeed(panStepper, &appliedPanStepsPerSec,
                  command.panStepsPerSec);
   applyAxisSpeed(tiltStepper, &appliedTiltStepsPerSec,
@@ -411,6 +523,8 @@ void setup() {
       panStepper, "Pan", PAN_DIR_PIN, PAN_DIR_HIGH_COUNTS_UP);
   const bool tiltReady = configureStepper(
       tiltStepper, "Tilt", TILT_DIR_PIN, TILT_DIR_HIGH_COUNTS_UP);
+
+  setDriversEnabled(true);
 
   portENTER_CRITICAL(&commandMux);
   lastValidCommandMs = millis();

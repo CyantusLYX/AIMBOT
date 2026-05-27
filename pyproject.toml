@@ -18,6 +18,7 @@ dependencies = [
     "tqdm>=4.65.0",
     "pyyaml>=5.4.0",
     "pyserial>=3.5",
+    "pygame>=2.5.0",
     "scipy>=1.10.0",
     "gdown>=4.5.1",
     "matplotlib>=3.5.0",

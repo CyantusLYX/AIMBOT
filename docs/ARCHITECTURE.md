@@ -1,11 +1,23 @@
 # AIMBOT — Architecture Reference
 
-> **Last updated**: 2026-03-14
+> **Last updated**: 2026-05-23
 > **Status**: Living document — update whenever a module boundary changes.
 
 ---
 
 ## System Overview
+
+The repository now has two host-side application shapes:
+
+- **Local pipeline**: reads from a local camera/video source and renders through
+  `OpenCVViewer`.
+- **Distributed PC brain**: receives Android video/IMU packets over UDP, renders
+  an operator panel, and drives the ESP32 gimbal through the ASCII protocol.
+
+Application assembly belongs in `src/app`. Files in `scripts/` should be thin
+CLI compatibility wrappers only. The distributed PC brain implementation now
+lives in `src/app/gimbal_brain_pc.py`; `scripts/gimbal_brain_pc.py` imports and
+calls that app module for backwards-compatible command invocation.
 
 ```
 Video Source / Camera
@@ -29,9 +41,9 @@ Video Source / Camera
   top-K candidates
         │  embeddings[N] or None
         ▼
- ByteTrack                 (tracking/byte_tracker.py)
-  IoU + optional Re-ID
-  cost-matrix matching
+ Tracker backend           (tracking/tracker_adapter.py)
+  BoT-SORT by default,
+  ByteTrack optional
         │  tracks: List[dict]
         ▼
  TargetController          (control/target_controller.py)
@@ -57,22 +69,94 @@ Side channel:
 
 ---
 
+## Distributed PC Brain Flow
+
+```
+Android sensor node
+        │
+        ▼
+ UdpFrameReceiver          (adapters/udp_stream.py)
+  non-blocking UDP + JPEG
+  reassembly + IMU samples
+        │  DecodedFrame(frame, imu, frame_id)
+        ▼
+ AsyncDetector.submit_latest()
+  drops stale frames to keep
+  operator control responsive
+        │  DetectionResult(frame, detections[N,6], context)
+        ▼
+ ReIDHelper                (pipeline/workers.py)
+  optional OSNet features
+        │
+        ▼
+ Tracker backend           (tracking/tracker_adapter.py)
+  BoT-SORT by default,
+  ByteTrack optional
+        │
+        ▼
+ Target selection + control
+  auto/manual lock, pixel
+  error, command gating
+        │
+        ▼
+ AsciiGimbalController     (control/ascii_gimbal_controller.py)
+  V/H/E ASCII firmware
+  commands with reconnect
+        │
+        ▼
+ ESP32 gimbal firmware
+
+Side channel:
+ Brain UI                  (target: ui/brain_viewer.py or app-local)
+  pygame operator panel,
+  motor/track toggles,
+  target selection
+```
+
+`gimbal_brain_pc.py` reuses the correct low-level building blocks:
+`UdpFrameReceiver`, `YoloV7Detector`, `AsyncDetector`, `GpuPreprocessor`,
+`ReIDHelper`, `TrackingService`, BoT-SORT/ByteTrack backends, and
+`AsciiGimbalController`. The remaining app-local responsibilities are CLI
+parsing, pygame rendering, target selection state, FPS metering, and
+proportional velocity control.
+
+Prefer extracting only reusable pieces:
+
+| Current app-local responsibility | Preferred home                                | Notes |
+| -------------------------------- | --------------------------------------------- | ----- |
+| CLI parsing + application assembly | `src/app/gimbal_brain_pc.py`                | `scripts/` imports and calls `main()`. |
+| Pygame operator panel            | `src/ui/brain_viewer.py` or app-local class   | Extract to `ui` only if it will be reused or tested separately. |
+| FPS meter                        | `src/pipeline/metrics.py` or app-local helper | `scripts/run_pipeline.py` has a similar helper; avoid two permanent copies. |
+| Detection/Re-ID/tracking composition | `src/services/tracking_service.py`        | Now reused by the PC brain and widened to the tracker-backend protocol. |
+| Target lock / click selection    | `src/control/target_controller.py`            | Reuse where possible; add brain-specific auto-select behavior only if needed. |
+| Pixel error and velocity control | `src/control/target_controller.py` + `pid.py` | Prefer `PIDController` or a small control service over app-local math. |
+| UDP frame reception              | `src/adapters/udp_stream.py`                  | Already in the right layer. |
+| ASCII firmware commands          | `src/control/ascii_gimbal_controller.py`      | Already in the right layer. |
+
+---
+
 ## Module Responsibilities
 
 | Module                 | Package     | Responsibility                                        |
 | ---------------------- | ----------- | ----------------------------------------------------- |
+| `gimbal_brain_pc.py`   | `app`       | Distributed PC brain assembly and run loop            |
 | `detector.py`          | `detection` | YoloV7 inference + pre/post-processing                |
+| `bot_sort.py`          | `tracking`  | Local BoT-SORT-ReID tracker backend                   |
 | `byte_tracker.py`      | `tracking`  | Multi-object IoU tracking + Re-ID matching            |
+| `tracker_adapter.py`   | `tracking`  | Tracker factory + C++ ByteTrack adapter fallback      |
 | `osnet.py`             | `reid`      | OSNet feature extraction (batch, crop, encode)        |
 | `workers.py`           | `pipeline`  | Async detect, CUDA resize, Re-ID scheduling           |
 | `video_source.py`      | `adapters`  | Video source opening/validation adapter               |
-| `tracking_service.py`  | `services`  | Tracking domain service (`ByteTrack` + `ReIDHelper`)  |
+| `udp_stream.py`        | `adapters`  | GBR1 UDP packet parsing and JPEG frame reassembly     |
+| `tracking_service.py`  | `services`  | Tracking domain service (tracker backend + ReIDHelper) |
 | `target_controller.py` | `control`   | Target lock lifecycle, reacquire, click-select        |
 | `pid.py`               | `control`   | Discrete PID with optional clamping                   |
 | `gimbal_controller.py` | `control`   | `GimbalBase` protocol + serial/dry-run implementation |
+| `ascii_gimbal_controller.py` | `control` | ESP32 ASCII firmware command transport          |
 | `viewer.py`            | `ui`        | OpenCV window, overlay rendering, mouse events        |
 | `config.py`            | `core`      | Frozen dataclass config tree (`PipelineConfig`)       |
-| `run_pipeline.py`      | `scripts`   | CLI entry point — assembles and runs the pipeline     |
+| `run_pipeline.py`      | `scripts`   | Current local-pipeline CLI; should become wrapper     |
+| `gimbal_brain_pc.py`   | `scripts`   | Thin PC-brain compatibility wrapper                   |
 
 ---
 
@@ -87,7 +171,7 @@ class DetectionResult:
     detections: np.ndarray      # shape (N, 6): x1 y1 x2 y2 conf class_id
 ```
 
-### Track dict (`tracking/byte_tracker.py`)
+### Track dict (`tracking/bot_sort.py`, `tracking/byte_tracker.py`)
 
 ```python
 {

@@ -160,6 +160,8 @@ class ByteTrack:
         match_iou_thresh: float = 0.3,
         max_age: int = 30,
         min_hits: int = 3,
+        min_box_area: float = 64.0,
+        max_aspect_ratio: float = 8.0,
         enable_reid: bool = False,
         reid_match_thresh: float = 0.45,
         feature_momentum: float = 0.9,
@@ -171,6 +173,8 @@ class ByteTrack:
         self.match_iou_thresh = match_iou_thresh
         self.max_age = max_age
         self.min_hits = min_hits
+        self.min_box_area = max(0.0, float(min_box_area))
+        self.max_aspect_ratio = max(1.0, float(max_aspect_ratio))
         self.enable_reid = enable_reid
         self.reid_match_thresh = reid_match_thresh
         self.feature_momentum = feature_momentum
@@ -225,20 +229,24 @@ class ByteTrack:
         dets = (
             detections[:, :6] if detections is not None else np.empty((0, 6), dtype=np.float32)
         )
+        keep_indices = np.arange(len(dets), dtype=np.int32)
         if dets.size == 0:
             dets = np.empty((0, 6), dtype=np.float32)
+        else:
+            dets, keep_indices = self._filter_detections(dets.astype(np.float32, copy=False), width, height)
 
         features: List[Optional[np.ndarray]]
         if embeddings is None:
             features = [None] * len(dets)
         else:
             features = [None] * len(dets)
-            for idx, feature in enumerate(embeddings):
-                if idx >= len(dets):
+            for filtered_idx, original_idx in enumerate(keep_indices):
+                if int(original_idx) >= len(embeddings):
                     break
+                feature = embeddings[int(original_idx)]
                 if feature is None:
                     continue
-                features[idx] = feature.astype(np.float32, copy=False)
+                features[filtered_idx] = feature.astype(np.float32, copy=False)
 
         for track in self._tracks:
             track.step()
@@ -329,7 +337,7 @@ class ByteTrack:
 
         results: List[dict] = []
         for track in self._tracks:
-            if track.hits >= self.min_hits or track.time_since_update == 0:
+            if track.hits >= self.min_hits:
                 results.append(
                     {
                         "track_id": track.track_id,
@@ -342,6 +350,38 @@ class ByteTrack:
                     }
                 )
         return results
+
+    def _filter_detections(self, detections: np.ndarray, width: int, height: int) -> tuple[np.ndarray, np.ndarray]:
+        if detections.size == 0:
+            return np.empty((0, 6), dtype=np.float32), np.empty((0,), dtype=np.int32)
+
+        boxes = detections[:, :4]
+        scores = detections[:, 4]
+        finite = np.isfinite(detections[:, :6]).all(axis=1)
+        x1 = np.clip(np.minimum(boxes[:, 0], boxes[:, 2]), 0, max(1, width) - 1)
+        y1 = np.clip(np.minimum(boxes[:, 1], boxes[:, 3]), 0, max(1, height) - 1)
+        x2 = np.clip(np.maximum(boxes[:, 0], boxes[:, 2]), 0, max(1, width) - 1)
+        y2 = np.clip(np.maximum(boxes[:, 1], boxes[:, 3]), 0, max(1, height) - 1)
+        box_w = x2 - x1
+        box_h = y2 - y1
+        area = box_w * box_h
+        aspect = np.maximum(box_w / np.maximum(box_h, 1e-6), box_h / np.maximum(box_w, 1e-6))
+        valid = (
+            finite
+            & (scores >= 0.0)
+            & (box_w >= 2.0)
+            & (box_h >= 2.0)
+            & (area >= self.min_box_area)
+            & (aspect <= self.max_aspect_ratio)
+        )
+        filtered = detections[valid].copy()
+        if filtered.size == 0:
+            return np.empty((0, 6), dtype=np.float32), np.empty((0,), dtype=np.int32)
+        filtered[:, 0] = x1[valid]
+        filtered[:, 1] = y1[valid]
+        filtered[:, 2] = x2[valid]
+        filtered[:, 3] = y2[valid]
+        return filtered, np.flatnonzero(valid).astype(np.int32)
 
     @staticmethod
     def as_xyxy(tracks: List[dict]) -> np.ndarray:

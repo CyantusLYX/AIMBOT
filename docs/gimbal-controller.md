@@ -24,6 +24,8 @@ baud. Values are signed STEP pulse rates after the active microstep setting.
 | Command | Meaning |
 | --- | --- |
 | `V:<pan>,<tilt>` | Set pan and tilt target velocity in step/s. |
+| `H:1` | Hold: stop STEP pulses and keep the TMC2209 drivers enabled for holding torque. |
+| `E:<0_or_1>` | Maintenance enable control for the shared TMC2209 driver enable line. `E:0` removes holding torque. |
 | `S:<max_step_hz>` | Set the runtime speed clamp. Firmware clamps this to `100..80000`. |
 | `M:<microsteps>` | Set both TMC2209 drivers to the requested microstep value. |
 
@@ -35,15 +37,43 @@ Example:
 ```text
 S:4000
 M:16
+H:1
 V:1000,-500
-V:0,0
+H:1
 ```
 
 If no valid velocity command is received for more than `500 ms`, the firmware
 sets both target speeds to zero. Invalid commands do not refresh the fail-safe.
 
-Changing microsteps stops both axes before writing the TMC2209 registers. This
-keeps the host velocity unit from changing while the motors are still moving.
+The distributed PC brain uses `H:1` when tracking is paused or a target is lost.
+This keeps basic damping/holding torque on the motors. `E:0` is reserved for
+maintenance cases where holding torque must be removed.
+
+## PC Brain Application Boundary
+
+The PC brain is the host-side distributed application that receives Android
+video/IMU packets over UDP, runs detection/tracking, renders the operator panel,
+and sends ASCII gimbal commands.
+
+Application boundary:
+
+- Implementation home: `src/app/gimbal_brain_pc.py`
+- Compatibility wrapper: `scripts/gimbal_brain_pc.py`
+- UDP adapter: `src/adapters/udp_stream.py`
+- ASCII gimbal transport: `src/control/ascii_gimbal_controller.py`
+
+The compatibility script remains the simplest launch path from a source
+checkout:
+
+```bash
+python scripts/gimbal_brain_pc.py --listen-host 0.0.0.0 --port 5005 --serial-port /dev/ttyUSB0
+```
+
+Installed or `PYTHONPATH=src` checkouts can also launch the app module directly:
+
+```bash
+python -m app.gimbal_brain_pc --listen-host 0.0.0.0 --port 5005 --serial-port /dev/ttyUSB0
+```
 
 ## Manual Control Tool
 
@@ -96,8 +126,10 @@ Choose the PyTorch wheel index that matches the target machine's CUDA runtime.
 
 ## Safety Notes
 
-- Send `V:0,0` before changing wiring, resetting the ESP32, or touching the
-  mechanism.
+- Send `H:1` before pausing tracking so the mechanism holds position without
+  removing motor torque.
+- Use `E:0` only when you intentionally need to remove holding torque for
+  maintenance.
 - Add a pull-up on the shared enable line so the TMC2209 drivers stay disabled
   while the ESP32 resets.
 - If the gimbal relies on motor holding torque to support weight, reset or power

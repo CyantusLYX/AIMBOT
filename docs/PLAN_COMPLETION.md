@@ -7,6 +7,8 @@ This report maps each phase in `memories/session/plan.md` to delivered artifacts
 - Overall completion: **100%**
 - Validation status: **passed**
 - Active refactor branch: `refactor/architecture-v1`
+- Post-plan architecture note: the distributed PC brain has been moved into
+  `src/app`, leaving `scripts/gimbal_brain_pc.py` as a thin wrapper.
 
 ## Phase-by-Phase Mapping
 
@@ -48,6 +50,37 @@ This report maps each phase in `memories/session/plan.md` to delivered artifacts
     - Obsolete inline responsibility removed from `scripts/run_pipeline.py`
       (capture opening and tracking composition moved into adapter/service layers)
     - Delivery docs consolidated in `docs/`.
+
+## Post-Plan Follow-Up: Distributed PC Brain
+
+Date recorded: 2026-05-22
+
+`scripts/gimbal_brain_pc.py` did not match the intended layer boundary for
+application assembly. It is now `src/app/gimbal_brain_pc.py`, with the script
+path kept only for backwards-compatible command invocation.
+
+The file already reuses several `src` modules:
+
+- `adapters.udp_stream`: GBR1 UDP packet parsing and decoded frame reception.
+- `detection.detector`: YOLOv7 detector and class filtering.
+- `pipeline.workers`: async detection, preprocessing, and Re-ID helper.
+- `tracking.tracker_adapter`: C++ ByteTrack adapter with Python fallback.
+- `control.ascii_gimbal_controller`: ESP32 ASCII command transport.
+
+The next implementation pass should reduce remaining script-local logic by
+reusing or extending:
+
+- `services.tracking_service` for ByteTrack + Re-ID composition. This is now
+  used by the PC brain after widening the tracker backend type.
+- `control.target_controller` for click selection, target lifecycle, and pixel
+  error helpers where behavior matches.
+- `control.pid` or a small control service for pan/tilt command generation.
+- `core.config` for PC-brain defaults instead of keeping all defaults in
+  `argparse`.
+
+This follow-up does not invalidate the original completion report; it records a
+new architecture correction discovered after the distributed PC brain path was
+reviewed.
 
 ## Re-run Commands
 
